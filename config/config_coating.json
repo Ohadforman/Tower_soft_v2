@@ -1,149 +1,145 @@
 {
-    "dies": {
-        "Die_110": {
-            "Die_Diameter": 110,
-            "Neck_Length": 0.002
-        },
-        "Die_120": {
-            "Die_Diameter": 120,
-            "Neck_Length": 0.002
-        },
-        "Die_125": {
-            "Die_Diameter": 125,
-            "Neck_Length": 0.002
-        },
-        "Die_130": {
-            "Die_Diameter": 130,
-            "Neck_Length": 0.002
-        },
-        "Die_140": {
-            "Die_Diameter": 140,
-            "Neck_Length": 0.002
-        },
-        "Die_150": {
-            "Die_Diameter": 150,
-            "Neck_Length": 0.002
-        },
-        "Die_160": {
-            "Die_Diameter": 160,
-            "Neck_Length": 0.002
-        },
-        "Die_202": {
-            "Die_Diameter": 205,
-            "Neck_Length": 0.002
-        },
-        "Die_205": {
-            "Die_Diameter": 205,
-            "Neck_Length": 0.002
-        },
-        "Die_249": {
-            "Die_Diameter": 249,
-            "Neck_Length": 0.002
-        },
-
-        "Die_270": {
-            "Die_Diameter": 270,
-            "Neck_Length": 0.002
-        },
-
-        "Die_290": {
-            "Die_Diameter": 290,
-            "Neck_Length": 0.002
-        },
-        "Die_300": {
-            "Die_Diameter": 300,
-            "Neck_Length": 0.002
-        },
-        "Die_310": {
-            "Die_Diameter": 310,
-            "Neck_Length": 0.002
-        },
-        "Die_330": {
-            "Die_Diameter": 330,
-            "Neck_Length": 0.002
-        },
-        "Die_344": {
-            "Die_Diameter": 344,
-            "Neck_Length": 0.002
-        },
-        "Die_345": {
-            "Die_Diameter": 345,
-            "Neck_Length": 0.002
-        },
-        "Die_366": {
-            "Die_Diameter": 366,
-            "Neck_Length": 0.002
-        },
-        "Die_374": {
-            "Die_Diameter": 374,
-            "Neck_Length": 0.002
-        },
-        "Die_429": {
-            "Die_Diameter": 429,
-            "Neck_Length": 0.002
-        },
-        "Die_471": {
-            "Die_Diameter": 471,
-            "Neck_Length": 0.002
-        },
-        "Die_518": {
-            "Die_Diameter": 518,
-            "Neck_Length": 0.002
-        },
-        "Die_537": {
-            "Die_Diameter": 543,
-            "Neck_Length": 0.002
-        },
-        "Die_552": {
-            "Die_Diameter": 552,
-            "Neck_Length": 0.002
-        },
-        "Die_637": {
-            "Die_Diameter": 637,
-            "Neck_Length": 0.002
-        },
-        "Die_641": {
-            "Die_Diameter": 641,
-            "Neck_Length": 0.002
-        },
-        "Die_785": {
-            "Die_Diameter": 785,
-            "Neck_Length": 0.002
-        }
+  "dies": {
+    "Die_110": {
+      "Die_Diameter": 110,
+      "Neck_Length": 0.002
     },
-    "coatings": {
-        "Coating_OF_136": {
-            "Density": 1.58e6,
-            "Description": "A durable coating with high resistance to heat."
-        },
-        "Coating_KS_1-002": {
-            "Viscosity": 2.2,
-            "Density": 1.02e6,
-            "Refractive Index": 1.4,
-            "Description": "A durable coating with high resistance to heat."
-
-        },
-        "Coating_KS_2-002": {
-            "Viscosity": 2.2,
-            "Density": 1.08e3,
-            "Refractive Index": 1.4,
-            "Description": "A durable coating with high resistance to heat."
-
-        },
-        "DS-2015": {
-            "Density": 1130,
-            "Refractive Index": 1.4,
-            "Description": "Next-generation UV-cure primary coating with high draw speeds."
-        },
-        "DP-1032": {
-            "Density": 1.05e3,
-            "Refractive Index": 1.4,
-            "Description": "High-performance primary coating optimized for optical fiber protection."
-        },
-        "DS-2042": {
-            "Density": 1.05e3,
-            "Refractive Index": 1.4,
-            "Description": "High-performance primary coating optimized for optical fiber protection."
-        }
+    "Die_120": {
+      "Die_Diameter": 120,
+      "Neck_Length": 0.002
+    },
+    "Die_125": {
+      "Die_Diameter": 125,
+      "Neck_Length": 0.002
+    },
+    "Die_130": {
+      "Die_Diameter": 130,
+      "Neck_Length": 0.002
+    },
+    "Die_140": {
+      "Die_Diameter": 140,
+      "Neck_Length": 0.002
+    },
+    "Die_150": {
+      "Die_Diameter": 150,
+      "Neck_Length": 0.002
+    },
+    "Die_160": {
+      "Die_Diameter": 160,
+      "Neck_Length": 0.002
+    },
+    "Die_202": {
+      "Die_Diameter": 205,
+      "Neck_Length": 0.002
+    },
+    "Die_205": {
+      "Die_Diameter": 205,
+      "Neck_Length": 0.002
+    },
+    "Die_249": {
+      "Die_Diameter": 249,
+      "Neck_Length": 0.002
+    },
+    "Die_270": {
+      "Die_Diameter": 270,
+      "Neck_Length": 0.002
+    },
+    "Die_290": {
+      "Die_Diameter": 290,
+      "Neck_Length": 0.002
+    },
+    "Die_300": {
+      "Die_Diameter": 300,
+      "Neck_Length": 0.002
+    },
+    "Die_310": {
+      "Die_Diameter": 310,
+      "Neck_Length": 0.002
+    },
+    "Die_330": {
+      "Die_Diameter": 330,
+      "Neck_Length": 0.002
+    },
+    "Die_344": {
+      "Die_Diameter": 344,
+      "Neck_Length": 0.002
+    },
+    "Die_345": {
+      "Die_Diameter": 345,
+      "Neck_Length": 0.002
+    },
+    "Die_366": {
+      "Die_Diameter": 366,
+      "Neck_Length": 0.002
+    },
+    "Die_374": {
+      "Die_Diameter": 374,
+      "Neck_Length": 0.002
+    },
+    "Die_429": {
+      "Die_Diameter": 429,
+      "Neck_Length": 0.002
+    },
+    "Die_471": {
+      "Die_Diameter": 471,
+      "Neck_Length": 0.002
+    },
+    "Die_518": {
+      "Die_Diameter": 518,
+      "Neck_Length": 0.002
+    },
+    "Die_537": {
+      "Die_Diameter": 543,
+      "Neck_Length": 0.002
+    },
+    "Die_552": {
+      "Die_Diameter": 552,
+      "Neck_Length": 0.002
+    },
+    "Die_637": {
+      "Die_Diameter": 637,
+      "Neck_Length": 0.002
+    },
+    "Die_641": {
+      "Die_Diameter": 641,
+      "Neck_Length": 0.002
+    },
+    "Die_785": {
+      "Die_Diameter": 785,
+      "Neck_Length": 0.002
     }
+  },
+  "coatings": {
+    "Coating_OF_136": {
+      "Density": 1580000.0,
+      "Description": "A durable coating with high resistance to heat."
+    },
+    "Coating_KS_1-002": {
+      "Viscosity": 2.2,
+      "Density": 1020000.0,
+      "Refractive Index": 1.4,
+      "Description": "A durable coating with high resistance to heat."
+    },
+    "Coating_KS_2-002": {
+      "Viscosity": 2.2,
+      "Density": 1080.0,
+      "Refractive Index": 1.4,
+      "Description": "A durable coating with high resistance to heat."
+    },
+    "DS-2015": {
+      "Density": 1130.0,
+      "Refractive Index": 1.4,
+      "Description": "Next-generation UV-cure primary coating with high draw speeds."
+    },
+    "DP-1032": {
+      "Density": 1050.0,
+      "Refractive Index": 1.4,
+      "Description": "High-performance primary coating optimized for optical fiber protection."
+    },
+    "DS-2042": {
+      "Density": 1050.0,
+      "Refractive Index": 1.4,
+      "Description": "High-performance primary coating optimized for optical fiber protection."
+    }
+  }
 }

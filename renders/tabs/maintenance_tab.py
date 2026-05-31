@@ -3663,7 +3663,7 @@ def render_maintenance_tab(P):
             est = pd.to_numeric(row.get("Est_Duration_Min", np.nan), errors="coerce")
             if pd.isna(est) or float(est) <= 0:
                 est = 60.0
-            slot = max(1, int(slot_min))
+            slot = 15
             rounded = int(math.ceil(float(est) / float(slot)) * slot)
             return max(slot, rounded)
 
@@ -4216,21 +4216,34 @@ def render_maintenance_tab(P):
                 pass
 
         horizon_days = int(st.session_state.get("maint_sched_horizon_days", 14))
-        slot_min = int(st.session_state.get("maint_sched_slot_minutes", 60))
+        schedule_grid_min = 15
         day_start_h = int(st.session_state.get("maint_sched_day_start", 8))
         day_end_h = int(st.session_state.get("maint_sched_day_end", 18))
-        queue_mode = st.session_state.get("maint_sched_queue_mode", "Urgent only")
-        weeks_ahead = int(st.session_state.get("maint_sched_weeks_ahead", 4))
+        include_overdue = bool(st.session_state.get("maint_sched_include_overdue", True))
+        include_due_soon = bool(st.session_state.get("maint_sched_include_due_soon", True))
         include_routine = bool(st.session_state.get("maint_sched_include_routine", False))
+        include_ok = bool(st.session_state.get("maint_sched_include_ok", False))
+        use_days_window = bool(st.session_state.get("maint_sched_use_days_window", True))
+        days_window = int(st.session_state.get("maint_sched_days_window", 7))
+        use_hours_window = bool(st.session_state.get("maint_sched_use_hours_window", True))
+        hours_window = float(st.session_state.get("maint_sched_hours_window", 10.0))
+        use_draws_window = bool(st.session_state.get("maint_sched_use_draws_window", True))
+        draws_window = int(st.session_state.get("maint_sched_draws_window", 5))
+        planning_strategy = st.session_state.get("maint_sched_strategy", "Urgency first")
+        component_priority = st.session_state.get("maint_sched_component_priority", [])
 
         group_options_set = set()
+        component_options_set = set()
         for _, rr in dfm.iterrows():
             for g in row_task_groups(rr):
                 group_options_set.add(g)
+            comp_name = safe_str(rr.get("Component", "")).strip()
+            if comp_name:
+                component_options_set.add(comp_name)
         group_options = sorted(group_options_set)
-        selected_task_group = ""
-        if queue_mode == "Task group":
-            selected_task_group = st.selectbox("Task group", options=group_options or [""], key="maint_sched_task_group")
+        component_options = sorted(component_options_set)
+        selected_task_groups = st.session_state.get("maint_sched_task_groups_focus", [])
+        selected_component_focus = st.session_state.get("maint_sched_component_focus", [])
 
         weekday_to_idx = {"Monday": 0, "Tuesday": 1, "Wednesday": 2, "Thursday": 3, "Sunday": 6}
         preferred_days = st.session_state.get("maint_sched_preferred_days", ["Thursday"])
@@ -4244,70 +4257,69 @@ def render_maintenance_tab(P):
             st.warning("Day end must be after day start.")
             return
 
-        # ---- Build candidate queue
-        statuses = ["OVERDUE", "DUE SOON"] + (["ROUTINE"] if include_routine else [])
-        base = dfm[dfm["Status"].isin(statuses)].copy()
-        due_ts = pd.to_datetime(base.get("Next_Due_Date"), errors="coerce")
+        # ---- Build candidate queue from status + timing windows + optional focus
+        base = dfm.copy()
+        status_mask = pd.Series(False, index=base.index)
+        if include_overdue:
+            status_mask = status_mask | base["Status"].astype(str).str.upper().eq("OVERDUE")
+        if include_due_soon:
+            status_mask = status_mask | base["Status"].astype(str).str.upper().eq("DUE SOON")
+        if include_routine:
+            status_mask = status_mask | base["Status"].astype(str).str.upper().eq("ROUTINE")
+        if include_ok:
+            status_mask = status_mask | base["Status"].astype(str).str.upper().eq("OK")
 
-        if queue_mode == "Urgent only":
-            cand = base[base["Status"].isin(["OVERDUE", "DUE SOON"])].copy()
-        elif queue_mode == "Weekly":
-            cand = base[base["Status"].isin(["OVERDUE", "DUE SOON"]) | (due_ts <= pd.Timestamp(current_date) + pd.Timedelta(days=7))].copy()
-        elif queue_mode == "3-Month":
-            cand = base[base["Status"].isin(["OVERDUE", "DUE SOON"]) | (due_ts <= pd.Timestamp(current_date) + pd.Timedelta(days=90))].copy()
-        elif queue_mode == "6-Month":
-            cand = base[base["Status"].isin(["OVERDUE", "DUE SOON"]) | (due_ts <= pd.Timestamp(current_date) + pd.Timedelta(days=180))].copy()
-        elif queue_mode == "Weeks ahead":
-            cand = base[base["Status"].isin(["OVERDUE", "DUE SOON"]) | (due_ts <= pd.Timestamp(current_date) + pd.Timedelta(days=int(weeks_ahead) * 7))].copy()
-        elif queue_mode == "Task group":
-            cand = filter_df_by_groups(base, [selected_task_group])
-        elif queue_mode == "From existing schedule":
-            sched_path = P.schedule_csv
-            if os.path.exists(sched_path):
-                try:
-                    sraw = _read_csv_keepna(sched_path)
-                except Exception:
-                    sraw = pd.DataFrame()
-            else:
-                sraw = pd.DataFrame()
-            if not sraw.empty:
-                for col in ["Description", "Start DateTime", "Event Type"]:
-                    if col not in sraw.columns:
-                        sraw[col] = ""
-                sraw["_start"] = pd.to_datetime(sraw["Start DateTime"], errors="coerce")
-                sraw = sraw[
-                    sraw["_start"].notna()
-                    & (sraw["_start"] >= pd.Timestamp(current_date) - pd.Timedelta(days=14))
-                    & (sraw["_start"] <= pd.Timestamp(current_date) + pd.Timedelta(days=int(weeks_ahead) * 7))
-                ].copy()
-                keys = set()
-                for _, sr in sraw.iterrows():
-                    desc = safe_str(sr.get("Description", ""))
-                    ev = safe_str(sr.get("Event Type", "")).lower()
-                    if "auto-maint" not in desc.lower() and "maint" not in ev:
-                        continue
-                    comp = ""
-                    task = ""
-                    task_id = ""
-                    try:
-                        body = desc.split("] ", 1)[1] if "] " in desc else desc
-                        left = body.split(" | ", 1)[0]
-                        if " - " in left:
-                            comp, task = left.split(" - ", 1)
-                        if "(ID:" in body:
-                            task_id = body.split("(ID:", 1)[1].split(")", 1)[0]
-                    except Exception:
-                        pass
-                    keys.add((safe_str(task_id).strip().lower(), safe_str(comp).strip().lower(), safe_str(task).strip().lower()))
-                base_keys = base.apply(_task_key, axis=1)
-                cand = base[base_keys.isin(keys)].copy()
-            else:
-                cand = base.iloc[0:0].copy()
-        else:
-            cand = base.copy()
+        tracking_mode_series = base.get("Tracking_Mode_norm", base.get("Tracking_Mode", pd.Series([""] * len(base), index=base.index))).astype(str).str.lower()
+        due_ts = pd.to_datetime(base.get("Next_Due_Date"), errors="coerce")
+        next_hours = pd.to_numeric(base.get("Next_Due_Hours"), errors="coerce")
+        cur_hours = pd.to_numeric(base.get("Current_Hours_For_Task", 0), errors="coerce")
+        next_draws = pd.to_numeric(base.get("Next_Due_Draw"), errors="coerce")
+
+        days_mask = pd.Series(False, index=base.index)
+        if use_days_window:
+            days_mask = (
+                tracking_mode_series.eq("calendar")
+                & due_ts.notna()
+                & (due_ts <= pd.Timestamp(current_date) + pd.Timedelta(days=int(days_window)))
+            )
+
+        hours_mask = pd.Series(False, index=base.index)
+        if use_hours_window:
+            hours_gap = next_hours - cur_hours
+            hours_mask = (
+                tracking_mode_series.eq("hours")
+                & next_hours.notna()
+                & cur_hours.notna()
+                & (hours_gap <= float(hours_window))
+            )
+
+        draws_mask = pd.Series(False, index=base.index)
+        if use_draws_window:
+            draws_gap = next_draws - float(current_draw_count)
+            draws_mask = (
+                tracking_mode_series.eq("draws")
+                & next_draws.notna()
+                & (draws_gap <= float(draws_window))
+            )
+
+        selected_mask = status_mask | days_mask | hours_mask | draws_mask
+        cand = base[selected_mask].copy()
+
+        if selected_task_groups:
+            cand = filter_df_by_groups(cand, selected_task_groups)
+
+        if selected_component_focus:
+            focus_norm = {safe_str(v).strip().lower() for v in selected_component_focus if safe_str(v).strip()}
+            cand = cand[
+                cand.get("Component", pd.Series([""] * len(cand), index=cand.index))
+                .astype(str)
+                .str.strip()
+                .str.lower()
+                .isin(focus_norm)
+            ].copy()
 
         if cand.empty:
-            st.info(f"No candidate tasks for queue: {queue_mode}.")
+            st.info("No candidate tasks match the current status/timing rules.")
             return
 
         watch_df = _build_maintenance_parts_watch_df(
@@ -4553,6 +4565,9 @@ def render_maintenance_tab(P):
         cand["Parts Ready"] = [x[1] for x in parts_eval]
         cand["Missing Parts"] = [x[2] for x in parts_eval]
 
+        comp_priority_norm = [safe_str(v).strip().lower() for v in component_priority if safe_str(v).strip()]
+        comp_priority_rank = {name: idx for idx, name in enumerate(comp_priority_norm)}
+
         def _urgency_score(row):
             score = 0.0
             status = str(row.get("Status", "")).upper()
@@ -4587,8 +4602,30 @@ def render_maintenance_tab(P):
                     pass
             return score
 
+        def _component_rank(row):
+            comp_key = safe_str(row.get("Component", "")).strip().lower()
+            return int(comp_priority_rank.get(comp_key, 999))
+
         cand["_urgency"] = cand.apply(_urgency_score, axis=1)
-        cand = cand.sort_values(["_urgency", "Component", "Task"], ascending=[False, True, True]).reset_index(drop=True)
+        cand["_component_rank"] = cand.apply(_component_rank, axis=1)
+        if planning_strategy == "Component priority first":
+            cand = cand.sort_values(
+                ["_component_rank", "_urgency", "Component", "Task"],
+                ascending=[True, False, True, True],
+            ).reset_index(drop=True)
+        elif planning_strategy == "Group same component work":
+            cand = cand.sort_values(
+                ["_component_rank", "Component", "_urgency", "Task"],
+                ascending=[True, True, False, True],
+            ).reset_index(drop=True)
+        elif planning_strategy == "Balanced urgency + component priority":
+            cand["_balanced_score"] = cand["_urgency"] - (cand["_component_rank"].clip(upper=50) * 3.0)
+            cand = cand.sort_values(
+                ["_balanced_score", "_urgency", "Component", "Task"],
+                ascending=[False, False, True, True],
+            ).reset_index(drop=True)
+        else:
+            cand = cand.sort_values(["_urgency", "Component", "Task"], ascending=[False, True, True]).reset_index(drop=True)
 
         max_tasks = int(st.session_state.get("maint_sched_max_tasks", min(12, len(cand))))
         cand = cand.head(int(max_tasks)).copy()
@@ -4627,7 +4664,7 @@ def render_maintenance_tab(P):
 
         # ---- Build free slots
         slots = []
-        slot_delta = pd.Timedelta(minutes=int(slot_min))
+        slot_delta = pd.Timedelta(minutes=int(schedule_grid_min))
         d = start_window.normalize()
         while d < end_window:
             # Friday/Saturday are non-working days.
@@ -4665,7 +4702,7 @@ def render_maintenance_tab(P):
                 est = pd.to_numeric(task.get("Est_Duration_Min", np.nan), errors="coerce")
                 if pd.isna(est) or float(est) <= 0:
                     est = 60.0
-                slot = max(1, int(slot_min))
+                slot = max(1, int(schedule_grid_min))
                 duration_min = max(slot, int(math.ceil(float(est) / float(slot)) * slot))
                 duration_td = pd.Timedelta(minutes=int(duration_min))
                 chosen = None
@@ -4726,8 +4763,29 @@ def render_maintenance_tab(P):
             # Lower is better.
             pref_penalty = float(dfx["_pref_class"].sum() * 10 + dfx["_pref_rank"].sum())
             spread_penalty = float(sum(max(0, int(v) - 1) for v in day_counts.values()) * 6)
+            component_day_penalty = 0.0
+            if "Component" in dfx.columns:
+                component_day_counts = dfx.groupby([dfx["_st"].dt.date, "Component"]).size().to_dict()
+                if planning_strategy == "Group same component work":
+                    component_day_penalty = float(
+                        -2.0 * sum(max(0, int(v) - 1) for v in component_day_counts.values())
+                    )
+                elif planning_strategy == "Balanced urgency + component priority":
+                    component_day_penalty = float(
+                        -1.0 * sum(max(0, int(v) - 1) for v in component_day_counts.values())
+                    )
             urgency_credit = float(pd.to_numeric(dfx.get("Urgency", 0), errors="coerce").fillna(0.0).sum() * 0.01)
-            return pref_penalty + spread_penalty - urgency_credit
+            priority_penalty = 0.0
+            if "Component" in dfx.columns and comp_priority_rank:
+                ranks = dfx["Component"].astype(str).str.strip().str.lower().map(lambda x: comp_priority_rank.get(x, 999))
+                priority_penalty = float(pd.to_numeric(ranks, errors="coerce").fillna(999).sum() * 0.02)
+                if planning_strategy == "Component priority first":
+                    priority_penalty *= 2.5
+                elif planning_strategy == "Balanced urgency + component priority":
+                    priority_penalty *= 1.25
+                else:
+                    priority_penalty *= 0.5
+            return pref_penalty + spread_penalty + priority_penalty + component_day_penalty - urgency_credit
 
         # Candidate plan variants (ranked).
         plan_variants = []
@@ -4931,38 +4989,81 @@ def render_maintenance_tab(P):
                 pass
 
             st.markdown("**Schedule rules**")
-            c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+            c1, c2, c3 = st.columns([1, 1, 1])
             with c1:
                 st.number_input("Plan horizon (days)", min_value=3, max_value=90, value=int(st.session_state.get("maint_sched_horizon_days", 14)), step=1, key="maint_sched_horizon_days")
             with c2:
-                slot_options = [30, 45, 60, 90, 120]
-                slot_value = int(st.session_state.get("maint_sched_slot_minutes", 60))
-                slot_index = slot_options.index(slot_value) if slot_value in slot_options else 2
-                st.selectbox("Slot length (min)", options=slot_options, index=slot_index, key="maint_sched_slot_minutes")
-            with c3:
                 st.number_input("Day start (hour)", min_value=0, max_value=23, value=int(st.session_state.get("maint_sched_day_start", 8)), step=1, key="maint_sched_day_start")
-            with c4:
+            with c3:
                 st.number_input("Day end (hour)", min_value=1, max_value=23, value=int(st.session_state.get("maint_sched_day_end", 18)), step=1, key="maint_sched_day_end")
+            st.caption("Task duration comes from Builder. The scheduler places tasks on an internal 15-minute planning grid.")
 
-            q1, q2, q3 = st.columns([1.5, 1, 1])
-            queue_options = [
-                "Urgent only",
-                "Weekly",
-                "3-Month",
-                "6-Month",
-                "Weeks ahead",
-                "Task group",
-                "From existing schedule",
-                "All pending",
-            ]
-            queue_value = st.session_state.get("maint_sched_queue_mode", "Urgent only")
-            queue_index = queue_options.index(queue_value) if queue_value in queue_options else 0
-            with q1:
-                st.selectbox("Queue source", queue_options, index=queue_index, key="maint_sched_queue_mode")
-            with q2:
-                st.number_input("Weeks ahead", min_value=1, max_value=52, value=int(st.session_state.get("maint_sched_weeks_ahead", 4)), step=1, key="maint_sched_weeks_ahead")
-            with q3:
+            st.caption("Choose which tasks enter the scheduling queue. You can combine status and timing windows together.")
+            s1, s2, s3, s4 = st.columns(4)
+            with s1:
+                st.checkbox("Include OVERDUE", value=bool(st.session_state.get("maint_sched_include_overdue", True)), key="maint_sched_include_overdue")
+            with s2:
+                st.checkbox("Include DUE SOON", value=bool(st.session_state.get("maint_sched_include_due_soon", True)), key="maint_sched_include_due_soon")
+            with s3:
                 st.checkbox("Include ROUTINE", value=bool(st.session_state.get("maint_sched_include_routine", False)), key="maint_sched_include_routine")
+            with s4:
+                st.checkbox("Include OK", value=bool(st.session_state.get("maint_sched_include_ok", False)), key="maint_sched_include_ok")
+
+            st.markdown("**Bring in near-term tasks**")
+            w1, w2, w3 = st.columns(3)
+            with w1:
+                st.checkbox("Calendar window", value=bool(st.session_state.get("maint_sched_use_days_window", True)), key="maint_sched_use_days_window")
+                st.number_input("Days ahead", min_value=1, max_value=180, value=int(st.session_state.get("maint_sched_days_window", 7)), step=1, key="maint_sched_days_window")
+            with w2:
+                st.checkbox("Hours window", value=bool(st.session_state.get("maint_sched_use_hours_window", True)), key="maint_sched_use_hours_window")
+                st.number_input("Hours ahead", min_value=1.0, max_value=5000.0, value=float(st.session_state.get("maint_sched_hours_window", 10.0)), step=1.0, key="maint_sched_hours_window")
+            with w3:
+                st.checkbox("Draw window", value=bool(st.session_state.get("maint_sched_use_draws_window", True)), key="maint_sched_use_draws_window")
+                st.number_input("Draws ahead", min_value=1, max_value=500, value=int(st.session_state.get("maint_sched_draws_window", 5)), step=1, key="maint_sched_draws_window")
+
+            f1, f2 = st.columns(2)
+            with f1:
+                st.multiselect(
+                    "Focus components (optional)",
+                    options=component_options,
+                    default=st.session_state.get("maint_sched_component_focus", []),
+                    key="maint_sched_component_focus",
+                    help="Leave empty to allow all components.",
+                )
+            with f2:
+                st.multiselect(
+                    "Focus task groups (optional)",
+                    options=group_options,
+                    default=st.session_state.get("maint_sched_task_groups_focus", []),
+                    key="maint_sched_task_groups_focus",
+                    help="Leave empty to allow all task groups.",
+                )
+
+            strat1, strat2 = st.columns([1.2, 1.8])
+            strategy_options = [
+                "Urgency first",
+                "Balanced urgency + component priority",
+                "Component priority first",
+                "Group same component work",
+            ]
+            strategy_value = st.session_state.get("maint_sched_strategy", "Urgency first")
+            strategy_index = strategy_options.index(strategy_value) if strategy_value in strategy_options else 0
+            with strat1:
+                st.selectbox(
+                    "Planning strategy",
+                    strategy_options,
+                    index=strategy_index,
+                    key="maint_sched_strategy",
+                    help="Choose whether the scheduler should focus mostly on timing urgency, component priority, or grouping related work.",
+                )
+            with strat2:
+                st.multiselect(
+                    "Component priority order",
+                    options=component_options,
+                    default=st.session_state.get("maint_sched_component_priority", []),
+                    key="maint_sched_component_priority",
+                    help="Selected components are preferred first, in the order you choose them.",
+                )
 
             weekday_options = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday"]
             preferred_default = st.session_state.get("maint_sched_preferred_days", ["Thursday"])
@@ -4992,6 +5093,30 @@ def render_maintenance_tab(P):
                 )
 
             st.markdown("**Automatic schedule result**")
+            selected_status_bits = []
+            if st.session_state.get("maint_sched_include_overdue", True):
+                selected_status_bits.append("OVERDUE")
+            if st.session_state.get("maint_sched_include_due_soon", True):
+                selected_status_bits.append("DUE SOON")
+            if st.session_state.get("maint_sched_include_routine", False):
+                selected_status_bits.append("ROUTINE")
+            if st.session_state.get("maint_sched_include_ok", False):
+                selected_status_bits.append("OK")
+            selected_window_bits = []
+            if st.session_state.get("maint_sched_use_days_window", True):
+                selected_window_bits.append(f"{int(st.session_state.get('maint_sched_days_window', 7))} days")
+            if st.session_state.get("maint_sched_use_hours_window", True):
+                selected_window_bits.append(f"{float(st.session_state.get('maint_sched_hours_window', 10.0)):.0f} hours")
+            if st.session_state.get("maint_sched_use_draws_window", True):
+                selected_window_bits.append(f"{int(st.session_state.get('maint_sched_draws_window', 5))} draws")
+            queue_rule_text = ", ".join(selected_status_bits) if selected_status_bits else "No status scope selected"
+            if selected_window_bits:
+                queue_rule_text += " | timing windows: " + ", ".join(selected_window_bits)
+            priority_rule_text = "No component priority set"
+            if component_priority:
+                priority_rule_text = " -> ".join(component_priority[:5]) + (" -> ..." if len(component_priority) > 5 else "")
+            st.caption(f"Window: {queue_rule_text} | Strategy: {planning_strategy} | Component priority: {priority_rule_text}")
+
             opt_labels = [
                 f"{p['name']} • score {p['score']:.1f} • tasks {len(p['plan_df'])}"
                 for p in ranked

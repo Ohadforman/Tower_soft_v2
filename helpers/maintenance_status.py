@@ -184,7 +184,17 @@ def _legacy_either_calendar(row):
 
 def normalize_maintenance_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df.rename(columns={c: NORMALIZE_MAP.get(str(c).strip().lower(), c) for c in df.columns}, inplace=True)
+    renamed_cols = [NORMALIZE_MAP.get(str(c).strip().lower(), c) for c in df.columns]
+    collapsed = pd.DataFrame(index=df.index)
+    for idx, col in enumerate(renamed_cols):
+        series = df.iloc[:, idx]
+        if col in collapsed.columns:
+            existing = collapsed[col]
+            existing_text = existing.apply(safe_str).str.strip()
+            collapsed[col] = existing.where(existing_text.ne(""), series)
+        else:
+            collapsed[col] = series
+    df = collapsed
     for col in REQUIRED_COLS:
         if col not in df.columns:
             df[col] = np.nan

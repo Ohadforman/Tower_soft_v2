@@ -1,0 +1,105 @@
+Parameter Name,Value,Units
+=== ORDER PARAMETERS ===,,
+Order__Draw Name,G009F_1,
+Order__Draw Date,2024-04-03 08:00:00,
+Order__Order Index,,
+Order__Preform Number,G009,
+Order__Fiber Project,Gai - Doc,
+Order__Priority,Normal,
+Order__Order Opener,,
+Order__Fiber Geometry Type,ROUND,
+Order__Tiger Cut (%),0.0,%
+Order__Octagonal F2F (mm),0.0,mm
+Order__Required Length (m) (for T&M+costumer),1000,m
+Order__Good Zones Count (required length zones),1,count
+Order__Fiber Diameter (µm),125.0,µm
+Order__Main Coating Diameter (µm),167.0,µm
+Order__Secondary Coating Diameter (µm),260.0,µm
+Order__Tension (g),40.0,g
+Order__Draw Speed (m/min),30.0,m/min
+Order__Main Coating,Coating_OF_136,
+Order__Secondary Coating,,
+Order__Main Coating Temperature (°C),28.0,°C
+Order__Secondary Coating Temperature (°C),28.0,°C
+Order__Order Notes,125,
+,,
+=== PROCESS SETUP ===,,
+Process__Process Setup Timestamp,2024-04-03 08:00:00,
+Process__Preform Diameter,16.5,mm
+Process__Preform Shape,Circular,
+Process__Octagonal Preform,0,bool
+Process__Octagonal F2F,0.0,mm
+Process__Tiger Preform,0,bool
+Process__Tiger Cut,0.0,%
+Process__PM Iris System,0,bool
+Process__Iris Mode,Manual,
+Process__Base Area,213.8246499849553,mm^2
+Process__Adjusted Area,213.8246499849553,mm^2
+Process__Effective Preform Diameter,16.5,mm
+Process__Selected Iris Diameter,23.0,mm
+Process__Iris Gap Area,201.65097845229482,mm^2
+Process__Entry Fiber Diameter,125.0,µm
+Process__Target First Coating Diameter,167.0,µm
+Process__Target Second Coating Diameter,260.0,µm
+Process__First Coating Diameter (Theoretical),167.0,µm
+Process__Second Coating Diameter (Theoretical),260.0,µm
+Process__Primary Coating,Coating_OF_136,
+Process__Secondary Coating,,
+Process__Primary Coating Temperature,28.0,°C
+Process__Secondary Coating Temperature,28.0,°C
+Process__Primary Die Diameter,,µm
+Process__Secondary Die Diameter,,µm
+Process__Primary Die Name,,
+Process__Secondary Die Name,,
+Process__Coating Die Selection Mode,Legacy Import,
+Process__Draw Speed,30.0,m/min
+Process__P Gain (Diameter Control),,
+Process__I Gain (Diameter Control),,
+Process__TF Mode,Winder,
+Process__Increment TF Value,,
+Process__Selected Drum,,
+,,
+=== LOGS DATA SECTION ===,,
+,,
+### DASHBOARD ZONES,,
+,,
+Zones Saved Timestamp,2024-04-03 08:00:00,
+Dashboard Log File,,
+Good Zones Count,0,count
+Good Zones X Column,Fibre Length,
+,,
+,,
+### WINDER & LENGTH,,
+,,
+Drum | Selected,,
+Fiber Length | End (log end),2.379,km
+,,
+—,—,
+CUT/SAVE Plan Source,G009F_1.csv,
+AUTO Plan Mode,Legacy import from cuts/good fiber,
+Zone Length Column (log),Fibre Length,
+Fiber Length End (log end),2.379,km
+Fiber Length Min (log),0.0,km
+Fiber Length Max (log),2.379,km
+T&M Coordinate System,km_from_end = (L_end - FibreLength),
+Good Zones Order,Ordered from spool end → toward start,
+T&M Step 1 Action,CUT,
+T&M Step 1 Length,0.02,km
+T&M Step 2 Action,SAVE,
+T&M Step 2 Length,0.08,km
+T&M Step 2 Zone,Good Zone 1,
+T&M Step 3 Action,CUT,
+T&M Step 3 Length,0.071,km
+T&M Step 4 Action,SAVE,
+T&M Step 4 Length,0.055,km
+T&M Step 4 Zone,Good Zone 2,
+T&M Step 5 Action,CUT,
+T&M Step 5 Length,0.454,km
+T&M Step 6 Action,SAVE,
+T&M Step 6 Length,0.74,km
+T&M Step 6 Zone,Good Zone 3,
+Total Saved Length,0.875,km
+Total Cut Length,0.545,km
+Preform Length After Draw,,cm
+Done Description,coating was overfloat on both,
+Done Timestamp,2024-04-03 08:00:00,

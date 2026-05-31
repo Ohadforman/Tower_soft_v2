@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import csv
 import json
 import mimetypes
@@ -14,11 +15,14 @@ import subprocess
 import hashlib
 import threading
 import shutil
+import tempfile
+import time
+from contextlib import ExitStack, contextmanager
 from html import escape as escape_html
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
@@ -33,6 +37,7 @@ ROOT_DIR_ENV = str(os.environ.get("TOWER_REBUILD_ROOT_DIR", "") or "").strip()
 DATA_DIR_ENV = str(os.environ.get("TOWER_REBUILD_DATA_DIR", "") or "").strip()
 ROOT_DIR = Path(ROOT_DIR_ENV).expanduser().resolve() if ROOT_DIR_ENV else BASE_DIR.parent
 STATIC_DIR = BASE_DIR / "static"
+VENDOR_DIR = BASE_DIR / ".vendor"
 DATA_DIR = Path(DATA_DIR_ENV).expanduser().resolve() if DATA_DIR_ENV else ROOT_DIR / "data"
 
 DRAW_ORDERS = DATA_DIR / "draw_orders.csv"
@@ -45,10 +50,90 @@ PROJECTS_FIBER = DATA_DIR / "projects_fiber.csv"
 PROJECTS_TEMPLATES = DATA_DIR / "projects_fiber_templates.csv"
 SAP_RODS_INVENTORY = DATA_DIR / "sap_rods_inventory.csv"
 SELECTED_CSV_JSON = DATA_DIR / "selected_csv.json"
+DEVELOPMENT_PROJECTS = DATA_DIR / "development_projects.csv"
+DEVELOPMENT_EXPERIMENTS = DATA_DIR / "development_experiments.csv"
+EXPERIMENT_UPDATES = DATA_DIR / "experiment_updates.csv"
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+if VENDOR_DIR.exists() and str(VENDOR_DIR) not in sys.path:
+    sys.path.insert(0, str(VENDOR_DIR))
 
 from helpers.maintenance_status import compute_maintenance_status_df, load_maintenance_folder_df
+
+
+_INVISIBLE_PATH_MARKS = str.maketrans("", "", "\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+
+
+def _strip_invisible_path_marks(value: str) -> str:
+    return str(value or "").translate(_INVISIBLE_PATH_MARKS)
+
+
+def _dataset_snapshot_signature_present(path: Path, include_zone_snapshots: bool = True, row_limit: int = 40) -> bool:
+    if not path.exists() or not path.is_file() or path.suffix.lower() != ".csv":
+        return False
+    accepted_markers = {"=== ORDER PARAMETERS ==="}
+    if include_zone_snapshots:
+        accepted_markers.add("=== ZONE SNAPSHOT ===")
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            header = [str(item or "").strip() for item in (reader.fieldnames or [])]
+            if header != ["Parameter Name", "Value", "Units"]:
+                return False
+            for index, row in enumerate(reader):
+                parameter_name = str((row or {}).get("Parameter Name", "")).strip()
+                if parameter_name in accepted_markers:
+                    return True
+                if index >= row_limit:
+                    break
+    except Exception:
+        return False
+    return False
+
+
+def _directory_has_dataset_snapshots(directory: Path, include_zone_snapshots: bool = True) -> bool:
+    if not directory.exists():
+        return False
+    try:
+        for path in directory.rglob("*.csv"):
+            if path.name == "_conversion_audit.csv":
+                continue
+            if _dataset_snapshot_signature_present(path, include_zone_snapshots=include_zone_snapshots):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def _copy_missing_children(source: Path, destination: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    for child in sorted(source.iterdir(), key=lambda item: item.name.lower()):
+        target = destination / child.name
+        if target.exists():
+            continue
+        if child.is_dir():
+            shutil.copytree(child, target)
+        else:
+            shutil.copy2(child, target)
+
+
+def resolve_default_dataset_dir(root_dir: Path) -> Path:
+    primary = root_dir / "data_set_csv"
+    legacy = root_dir / "legacy_converted_out_v2"
+    if primary.exists():
+        if _directory_has_dataset_snapshots(legacy, include_zone_snapshots=False) and not _directory_has_dataset_snapshots(primary, include_zone_snapshots=False):
+            try:
+                _copy_missing_children(legacy, primary)
+            except OSError:
+                return legacy
+        return primary
+    if legacy.exists():
+        try:
+            _copy_missing_children(legacy, primary)
+            return primary
+        except OSError:
+            return legacy
+    return primary
 
 MAINTENANCE_DIR = ROOT_DIR / "maintenance"
 COATING_CONFIG = ROOT_DIR / "config" / "config_coating.json"
@@ -56,26 +141,32 @@ PID_CONFIG = ROOT_DIR / "config" / "pid_config.json"
 CONTAINER_CONFIG = ROOT_DIR / "config" / "container_config.json"
 DIES_CONFIG = ROOT_DIR / "config" / "dies_6station.json"
 HEATER_CONFIG = ROOT_DIR / "config" / "heater_config.json"
-DATASET_DIR = ROOT_DIR / "data_set_csv"
+DATASET_DIR = resolve_default_dataset_dir(ROOT_DIR)
 LOGS_DIR = ROOT_DIR / "logs"
 REPORTS_DIR = ROOT_DIR / "reports"
 REPORT_CENTER_DIR = REPORTS_DIR / "report_center"
+DASHBOARD_PLOTS_DIR = REPORTS_DIR / "dashboard_plots"
+MAINTENANCE_MANUAL_PAGES_DIR = REPORTS_DIR / "maintenance_manual_pages"
 DEVELOPMENT_MEDIA_DIR = ROOT_DIR / "development_media"
 BACKUPS_DIR = ROOT_DIR / "backups"
+DONE_SNAPSHOTS_DIR = ROOT_DIR / "hooks" / "done_csv_snapshots"
 DUCKDB_PATH = DATA_DIR / "tower.duckdb"
 STATE_DIR = ROOT_DIR / "state"
 DASHBOARD_EXPORTS_DIR = STATE_DIR / "dashboard_exports"
-DOWNLOADS_DIR = Path.home() / "Downloads"
 COATING_STOCK = STATE_DIR / "coating_type_stock.json"
+COATING_INVENTORY_META = STATE_DIR / "coating_inventory_meta.json"
 CONTAINER_SNAPSHOT = STATE_DIR / "container_levels_prev.json"
 MAINTENANCE_STATE = MAINTENANCE_DIR / "maintenance_task_state.csv"
 MAINTENANCE_ACTIONS = MAINTENANCE_DIR / "maintenance_actions_log.csv"
 MAINTENANCE_WAITS = MAINTENANCE_DIR / "maintenance_wait_parts_log.csv"
 MAINTENANCE_RUNTIME = MAINTENANCE_DIR / "_app_state.json"
+MAINTENANCE_WORK_PACKAGES = MAINTENANCE_DIR / "maintenance_work_packages.csv"
 MAINTENANCE_PACKAGE_PHOTOS_DIR = STATIC_DIR / "uploads" / "maintenance_packages"
+MAINTENANCE_TEST_PRESETS = MAINTENANCE_DIR / "maintenance_test_presets.json"
 TOWER_TEMPS = DATA_DIR / "tower_temps.csv"
 TOWER_CONTAINERS = DATA_DIR / "tower_containers.csv"
-PREFORM_INVENTORY = DATA_DIR / "preform_inventory.csv"
+CONTAINER_LOGGER_SCRIPT = BASE_DIR / "tools" / "tower_containers_logger.py"
+PREFORM_INVENTORY = DATA_DIR / "preforms_inventory.csv"
 FAULTS_LOG = MAINTENANCE_DIR / "faults_log.csv"
 FAULTS_ACTIONS_LOG = MAINTENANCE_DIR / "faults_actions_log.csv"
 ARGON_MONTHLY_REPORT = REPORTS_DIR / "gas" / "argon_monthly_report.csv"
@@ -84,6 +175,25 @@ EXTERNAL_MANUALS_DIR = ROOT_DIR.parent / "manuals"
 MANUAL_INDEX_SCRIPT = BASE_DIR / "tools" / "extract_manual_index.py"
 MANUAL_PAGE_RENDER_SCRIPT = BASE_DIR / "tools" / "render_manual_page.swift"
 MANUAL_PAGE_CACHE_DIR = STATE_DIR / "manual_page_cache"
+DEFAULT_COATING_MIN_STOCK_KG = 1.0
+DEFAULT_CONTAINER_DIAMETER_MM = 280.0
+DEFAULT_CONTAINER_FILL_HEIGHT_MM = 300.0
+DEFAULT_CONTAINER_DENSITY_KG_PER_L = 1.0
+DEFAULT_CONTAINER_LOW_PERCENT = 15.0
+CONTAINER_FEED_STALE_SECONDS = 60.0
+CONTAINER_FEED_SMOOTHING_SAMPLES = 4
+CONTAINER_LOGGER_SCAN_INTERVAL_SECONDS = 2.0
+CONTAINER_LOGGER_LOG_INTERVAL_SECONDS = 5.0
+CONTAINER_LOGGER_STALE_THRESHOLD_SECONDS = 60.0
+AUTO_CONTAINER_REFILL_MIN_KG = 0.0
+AUTO_CONTAINER_REFILL_MIN_PERCENT = 30.0
+CONTAINER_SENSOR_OPTIONS = ("tank1", "tank2", "tank3", "tank4")
+CONTAINER_SENSOR_DEFAULTS = {
+    "A": "tank1",
+    "B": "tank2",
+    "C": "tank3",
+    "D": "tank4",
+}
 BUNDLED_RUNTIME_PYTHON = Path.home() / ".cache" / "codex-runtimes" / "codex-primary-runtime" / "dependencies" / "python" / "bin" / "python3"
 HELPER_PYTHON_ENV = str(os.environ.get("TOWER_REBUILD_HELPER_PYTHON", "") or "").strip()
 MANUAL_PAGE_MODE_ENV = str(os.environ.get("TOWER_REBUILD_MANUAL_PAGE_MODE", "") or "").strip().lower()
@@ -99,11 +209,13 @@ GOOD_ZONES_COL = "Good Zones Count (required length zones)"
 LENGTH_COL = "Required Length (m) (for T&M+costumer)"
 MAIN_TEMP_COL = "Main Coating Temperature (°C)"
 SECONDARY_TEMP_COL = "Secondary Coating Temperature (°C)"
+FURNACE_TEMP_COL = "Furnace Temperature (°C)"
 FIBER_TOL_COL = "Fiber Diameter Tol (± µm)"
 MAIN_TOL_COL = "Main Coating Diameter Tol (± µm)"
 SECONDARY_TOL_COL = "Secondary Coating Diameter Tol (± µm)"
 TIGER_CUT_COL = "Tiger Cut (%)"
 OCT_F2F_COL = "Octagonal F2F (mm)"
+PREFORM_DIAMETER_COL = "Preform Diameter (mm)"
 SCHEDULE_PASSWORD = "DORON"
 SCHEDULE_REQUIRED_COLS = ["Event Type", "Start DateTime", "End DateTime", "Description", "Recurrence"]
 ORDER_DRAW_GEOMETRY_OPTIONS = [
@@ -121,6 +233,7 @@ ORDER_DRAW_GEOMETRY_OPTIONS = [
 TEMPLATE_FIELDS = [
     PROJECTS_COL,
     GEOMETRY_COL,
+    PREFORM_DIAMETER_COL,
     TIGER_CUT_COL,
     OCT_F2F_COL,
     "Fiber Diameter (µm)",
@@ -131,6 +244,7 @@ TEMPLATE_FIELDS = [
     SECONDARY_TOL_COL,
     "Tension (g)",
     "Draw Speed (m/min)",
+    FURNACE_TEMP_COL,
     "Main Coating",
     "Secondary Coating",
     MAIN_TEMP_COL,
@@ -155,6 +269,7 @@ REPORT_CENTER_SECTIONS = [
     "Maintenance Tests + Measurements",
     "Consumables Snapshot",
 ]
+AUTO_MOVE_DONE_TO_TM_DAYS = 5
 
 CONSUMABLE_TEMP_FIELDS = [
     "die_holder_primary_c",
@@ -201,6 +316,156 @@ _MANUAL_PAGE_PRIORITY_PREFETCH_QUEUED: set[str] = set()
 _MANUAL_PAGE_PREFETCH_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="manual-page-prefetch")
 _MANUAL_PAGE_PRIORITY_PREFETCH_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="manual-page-prefetch-priority")
 _HELPER_PYTHON_CACHE: dict[tuple[str, ...], Path | None] = {}
+_REQUEST_LOCKS_DIR = STATE_DIR / "request_locks"
+_REQUEST_LOCK_TIMEOUT_SECONDS = 30.0
+_REQUEST_LOCK_STALE_SECONDS = 900.0
+_REQUEST_LOCK_GUARDS: dict[str, threading.RLock] = {}
+_REQUEST_LOCK_GUARDS_LOCK = threading.Lock()
+_TRACKED_PATH_OVERRIDES_MTIME_NS: int | None = None
+
+
+def _request_lock_guard(lock_path: Path) -> threading.RLock:
+    key = str(lock_path)
+    with _REQUEST_LOCK_GUARDS_LOCK:
+        lock = _REQUEST_LOCK_GUARDS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _REQUEST_LOCK_GUARDS[key] = lock
+        return lock
+
+
+def _normalized_lock_target(path: Path | str) -> Path:
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = ROOT_DIR / candidate
+    try:
+        return candidate.resolve()
+    except FileNotFoundError:
+        return Path(os.path.abspath(str(candidate)))
+
+
+def _request_lock_file_path(path: Path | str) -> Path:
+    target = _normalized_lock_target(path)
+    key = hashlib.sha1(str(target).encode("utf-8")).hexdigest()
+    return _REQUEST_LOCKS_DIR / f"{key}.lock"
+
+
+@contextmanager
+def hold_request_lock(path: Path | str, timeout: float = _REQUEST_LOCK_TIMEOUT_SECONDS):
+    lock_target = _normalized_lock_target(path)
+    lock_path = _request_lock_file_path(lock_target)
+    _REQUEST_LOCKS_DIR.mkdir(parents=True, exist_ok=True)
+    guard = _request_lock_guard(lock_path)
+    with guard:
+        started = time.monotonic()
+        while True:
+            try:
+                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(
+                        json.dumps(
+                            {
+                                "path": str(lock_target),
+                                "pid": os.getpid(),
+                                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            }
+                        )
+                    )
+                break
+            except FileExistsError:
+                try:
+                    age = time.time() - lock_path.stat().st_mtime
+                except FileNotFoundError:
+                    continue
+                if age > _REQUEST_LOCK_STALE_SECONDS:
+                    try:
+                        lock_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    continue
+                if time.monotonic() - started > timeout:
+                    raise TimeoutError(f"Timed out waiting for shared app lock: {lock_target}")
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
+@contextmanager
+def hold_request_locks(paths: list[Path | str] | tuple[Path | str, ...]):
+    normalized: list[Path] = []
+    seen: set[str] = set()
+    for item in paths:
+        candidate = _normalized_lock_target(item)
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(candidate)
+    with ExitStack() as stack:
+        for item in sorted(normalized, key=lambda candidate: str(candidate)):
+            stack.enter_context(hold_request_lock(item))
+        yield
+
+
+def atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding=encoding, newline="") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def atomic_write_bytes(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def write_dataframe_atomic(path: Path, df: pd.DataFrame) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=path.suffix or ".tmp", dir=str(path.parent))
+    os.close(fd)
+    temp_path = Path(temp_name)
+    try:
+        suffix = path.suffix.lower()
+        if suffix in {".xlsx", ".xls"}:
+            df.to_excel(temp_path, index=False)
+        else:
+            df.to_csv(temp_path, index=False)
+        os.replace(temp_path, path)
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def read_csv_rows(path: Path) -> list[dict[str, str]]:
@@ -218,12 +483,133 @@ def read_csv_fieldnames(path: Path) -> list[str]:
         return next(reader, [])
 
 
+LEGACY_LOG_COLUMN_MAP = {
+    "[plc]BareFibreDiaDisplay": "Bare Fibre Diameter",
+    "[plc]diadevbaremv": "Diameter Error",
+    "[plc]PfProcessPsn": "Pf Process Position",
+    "[plc]cpspdactval": "Capstan Speed",
+    "[plc]CpLenTareVal": "Fibre Length",
+    "[plc]GoodFibreStartState": "Good Fibre State",
+    "[plc]FrnTmpMv": "Furnace DegC Actual",
+    "[plc]FrnPwrMv": "Furnace Power",
+    "[plc]pfspdactval": "Preform Speed Actual",
+    "[plc]FrnMFC1MV": "Furnace MFC1 Actual",
+    "[plc]FrnMFC2MV": "Furnace MFC2 Actual",
+    "[plc]FrnMFC3MV": "Furnace MFC3 Actual",
+    "[plc]FrnMFC4MV": "Furnace MFC4 Actual",
+    "[plc]CaneSpdActVal": "Cane Speed Actual",
+    "[plc]TenTareVal": "Tension N",
+    "[plc]TrendMarkerPulse": "Trend Marker",
+    "[plc]CoatedOuterFibreDiaDisplay": "Coated Outer Diameter",
+    "[plc]FrnMFC1SP": "Furnace MFC1 Set",
+    "[plc]FrnMFC3SP": "Furnace MFC3 Set",
+    "[plc]FrnMFC4SP": "Furnace MFC4 Set",
+    "[plc]FrnMFC2SP": "Furnace MFC2 Set",
+    "[plc]FrnTmpSP": "Furnace DegC Set",
+    "[plc]UVHiLo[0].status": "UV1 Status",
+    "[plc]UVHiLO[1].Status": "UV2 Status",
+    "plc]PolyXDia": "Poly X Diameter",
+    "plc]PolyYDia": "Poly Y Diameter",
+    "[plc]PloyMajorAxis": "Poly Major Value",
+    "[plc]PolyMinorAxis": "Poly Minor Value",
+    "[plc]DiaDevXYBareMV": "Diameter Deviation Gauge 2",
+    "[plc]CoatedInnerFibreDiaDisplay": "Coated Inner Diameter",
+    "[plc]UVLamp1Intensity": "UV 1 Intensity",
+    "[plc]UVLamp2Intensity": "UV 2 Intensity",
+}
+LEGACY_LOG_COLUMN_MAP_NORMALIZED = {
+    str(key).strip().lower(): value for key, value in LEGACY_LOG_COLUMN_MAP.items()
+}
+LEGACY_LOG_MAPPED_VALUES_NORMALIZED = {
+    str(value).strip().lower() for value in LEGACY_LOG_COLUMN_MAP.values()
+}
+
+
+def normalize_log_column_name(name: object) -> str:
+    raw = str(name or "").strip()
+    if not raw:
+        return ""
+    return LEGACY_LOG_COLUMN_MAP.get(raw) or LEGACY_LOG_COLUMN_MAP_NORMALIZED.get(raw.lower(), raw)
+
+
+def normalize_dataset_parameter_name(name: object) -> str:
+    raw = str(name or "").strip()
+    if not raw:
+        return ""
+    # Older dataset exports mixed "Fiber Length" and the mapped PLC label "Fibre Length".
+    # Normalize them at read time so SQL Lab, zone views, and reports stay consistent.
+    return raw.replace("Fiber Length", "Fibre Length")
+
+
+def normalize_dataset_parameter_value(parameter_name: str, value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if parameter_name in {"Good Zones X Column", "Zone Length Column (log)"}:
+        return raw.replace("Fiber Length", "Fibre Length")
+    return raw
+
+
+def load_log_csv_rows(path: Path) -> tuple[list[dict[str, object]], dict[str, str]]:
+    if not path.exists():
+        return [], {}
+    skiprows = 0
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.reader(handle)
+        first_row = next(reader, [])
+    if len(first_row) == 1 and str(first_row[0] or "").strip().lower() == "data log":
+        skiprows = 1
+    try:
+        df = pd.read_csv(path, skiprows=skiprows)
+    except Exception:
+        return [], {}
+    if df is None or df.empty:
+        return [], {}
+    df.columns = [str(column).strip() for column in df.columns]
+    original_headers = list(df.columns)
+    rename_map = {column: normalize_log_column_name(column) for column in original_headers}
+    df.rename(columns=rename_map, inplace=True)
+    df.dropna(axis=1, how="all", inplace=True)
+    if df.columns.duplicated().any():
+        merged = pd.DataFrame(index=df.index)
+        ordered_cols = list(dict.fromkeys(df.columns.tolist()))
+        for column in ordered_cols:
+            same_name = df.loc[:, df.columns == column]
+            if isinstance(same_name, pd.Series):
+                merged[column] = same_name
+            else:
+                merged[column] = same_name.bfill(axis=1).iloc[:, 0]
+        df = merged
+    display_labels = {}
+    for original, mapped in rename_map.items():
+        if mapped and original and mapped != original:
+            display_labels[mapped] = mapped
+    return df.to_dict(orient="records"), display_labels
+
+
 def write_csv_rows(path: Path, rows: list[dict[str, object]], fieldnames: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+    resolved_fieldnames = list(fieldnames or [])
+    for row in rows:
+        for key in row.keys():
+            if key not in resolved_fieldnames:
+                resolved_fieldnames.append(key)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=resolved_fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def read_json_dict(path: Path) -> dict:
@@ -247,7 +633,7 @@ def read_json_value(path: Path, default):
 
 def write_json_value(path: Path, value) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2), encoding="utf-8")
+    atomic_write_text(path, json.dumps(value, indent=2), encoding="utf-8")
 
 
 def _python_candidate_paths() -> list[Path]:
@@ -285,6 +671,10 @@ def _python_supports_modules(candidate: Path, required_modules: tuple[str, ...])
     if not required_modules:
         return True
     try:
+        env = dict(os.environ)
+        vendor_python_path = str(VENDOR_DIR)
+        current_python_path = str(env.get("PYTHONPATH", "") or "").strip()
+        env["PYTHONPATH"] = vendor_python_path if not current_python_path else f"{vendor_python_path}{os.pathsep}{current_python_path}"
         result = subprocess.run(
             [
                 str(candidate),
@@ -296,6 +686,7 @@ def _python_supports_modules(candidate: Path, required_modules: tuple[str, ...])
             capture_output=True,
             text=True,
             timeout=20,
+            env=env,
         )
     except (OSError, subprocess.SubprocessError):
         return False
@@ -330,27 +721,154 @@ def manual_page_render_mode() -> str:
 
 def ensure_runtime_directories() -> None:
     for path in (
+        DATA_DIR,
+        MAINTENANCE_DIR,
         STATE_DIR,
         DASHBOARD_EXPORTS_DIR,
+        LOGS_DIR,
         REPORTS_DIR,
         REPORT_CENTER_DIR,
+        DASHBOARD_PLOTS_DIR,
+        MAINTENANCE_MANUAL_PAGES_DIR,
         BACKUPS_DIR,
+        DONE_SNAPSHOTS_DIR,
         DEVELOPMENT_MEDIA_DIR,
+        DATASET_DIR,
+        MANUALS_DIR,
         MANUAL_PAGE_CACHE_DIR,
         STATIC_DIR / "uploads",
+        MAINTENANCE_PACKAGE_PHOTOS_DIR,
     ):
         path.mkdir(parents=True, exist_ok=True)
+    ensure_runtime_seed_files()
+
+
+def ensure_runtime_seed_files() -> None:
+    if not PARTS_INVENTORY.exists():
+        write_csv_rows(
+            PARTS_INVENTORY,
+            [],
+            ["Part Name", "Item Type", "Component", "Supplier", "Serial Number", "Location", "Location Serial", "Quantity", "Min Level", "Notes", "Last Updated"],
+        )
+    if not PARTS_LOCATIONS.exists():
+        write_csv_rows(
+            PARTS_LOCATIONS,
+            [{"Location Name": "Mounted", "Location Serial": "MOUNTED", "Notes": "Default machine-mounted location"}],
+            ["Location Name", "Location Serial", "Notes"],
+        )
+    if not PARTS_COMPANIES.exists():
+        write_csv_rows(PARTS_COMPANIES, [], ["Company", "Last Updated"])
+    if not PROJECTS_TEMPLATES.exists():
+        write_csv_rows(PROJECTS_TEMPLATES, [], TEMPLATE_FIELDS[:])
+    if not TOWER_TEMPS.exists():
+        temp_fields = CONSUMABLE_TEMP_FIELDS + [consumable_temp_setpoint_csv_field(field) for field in CONSUMABLE_TEMP_FIELDS] + ["updated_at"]
+        temp_row = {field: "0" for field in temp_fields if field != "updated_at"}
+        temp_row["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        write_csv_rows(TOWER_TEMPS, [temp_row], temp_fields)
+    if not TOWER_CONTAINERS.exists():
+        container_fields = ["timestamp", "tank1", "tank2", "tank3", "tank4"]
+        container_rows = [
+            {"timestamp": "18/05/2026 17:33", "tank1": "88.39", "tank2": "90.62", "tank3": "90.99", "tank4": "90.99"},
+            {"timestamp": "18/05/2026 17:34", "tank1": "88.55", "tank2": "90.62", "tank3": "89.68", "tank4": "90.91"},
+            {"timestamp": "18/05/2026 17:35", "tank1": "88.34", "tank2": "90.63", "tank3": "89.64", "tank4": "91.01"},
+            {"timestamp": "18/05/2026 17:36", "tank1": "88.42", "tank2": "90.62", "tank3": "89.78", "tank4": "90.94"},
+            {"timestamp": "18/05/2026 17:37", "tank1": "88.39", "tank2": "90.62", "tank3": "89.70", "tank4": "91.00"},
+            {"timestamp": "18/05/2026 17:38", "tank1": "88.47", "tank2": "90.62", "tank3": "89.64", "tank4": "92.47"},
+            {"timestamp": "18/05/2026 17:39", "tank1": "88.48", "tank2": "90.65", "tank3": "89.83", "tank4": "92.38"},
+            {"timestamp": "18/05/2026 17:40", "tank1": "88.37", "tank2": "90.67", "tank3": "89.70", "tank4": "91.93"},
+            {"timestamp": "18/05/2026 17:41", "tank1": "88.50", "tank2": "90.80", "tank3": "89.69", "tank4": "91.90"},
+            {"timestamp": "18/05/2026 17:42", "tank1": "88.52", "tank2": "90.65", "tank3": "89.64", "tank4": "91.89"},
+        ]
+        write_csv_rows(TOWER_CONTAINERS, container_rows, container_fields)
+    if not MAINTENANCE_WAITS.exists():
+        write_csv_rows(
+            MAINTENANCE_WAITS,
+            [],
+            ["wait_id", "maintenance_task_id", "maintenance_component", "maintenance_task", "part_name", "quantity", "opened_ts", "resolved_ts", "notes"],
+        )
+    if not MAINTENANCE_RUNTIME.exists():
+        write_json_value(
+            MAINTENANCE_RUNTIME,
+            {
+                "furnace_hours": 0.0,
+                "uv1_hours": 0.0,
+                "uv2_hours": 0.0,
+                "last_draw_count": 0,
+                "current_date": datetime.now().strftime("%Y-%m-%d"),
+                "warn_days": 14,
+                "warn_hours": 50.0,
+            },
+        )
+    if not FAULTS_ACTIONS_LOG.exists():
+        write_csv_rows(
+            FAULTS_ACTIONS_LOG,
+            [],
+            ["fault_action_id", "fault_id", "action_ts", "action_type", "actor", "note", "fix_summary"],
+        )
+    if not ARGON_MONTHLY_REPORT.exists():
+        write_csv_rows(ARGON_MONTHLY_REPORT, [], ["month", "total_standard_liters"])
+    if not DUCKDB_PATH.exists():
+        if duckdb is not None:
+            conn = duckdb.connect(str(DUCKDB_PATH))
+            conn.close()
+        else:
+            atomic_write_bytes(DUCKDB_PATH, b"")
 
 
 TRACKED_PATH_OVERRIDES_FILE = STATE_DIR / "tracked_path_overrides.json"
 TRACKED_PATH_SPECS = (
     {"key": "orders_csv", "label": "Orders CSV", "global_name": "DRAW_ORDERS", "kind": "file", "default": DRAW_ORDERS},
     {"key": "parts_orders_csv", "label": "Parts Orders CSV", "global_name": "PART_ORDERS", "kind": "file", "default": PART_ORDERS},
+    {"key": "parts_inventory_csv", "label": "Parts Inventory CSV", "global_name": "PARTS_INVENTORY", "kind": "file", "default": PARTS_INVENTORY},
+    {"key": "parts_locations_csv", "label": "Parts Locations CSV", "global_name": "PARTS_LOCATIONS", "kind": "file", "default": PARTS_LOCATIONS},
+    {"key": "parts_companies_csv", "label": "Parts Companies CSV", "global_name": "PARTS_COMPANIES", "kind": "file", "default": PARTS_COMPANIES},
     {"key": "schedule_csv", "label": "Schedule CSV", "global_name": "TOWER_SCHEDULE", "kind": "file", "default": TOWER_SCHEDULE},
+    {"key": "sap_inventory_csv", "label": "SAP Inventory CSV", "global_name": "SAP_RODS_INVENTORY", "kind": "file", "default": SAP_RODS_INVENTORY},
+    {"key": "preform_inventory_csv", "label": "Preform Inventory CSV", "global_name": "PREFORM_INVENTORY", "kind": "file", "default": PREFORM_INVENTORY},
     {"key": "selected_csv_json", "label": "Selected CSV JSON", "global_name": "SELECTED_CSV_JSON", "kind": "file", "default": SELECTED_CSV_JSON},
+    {"key": "development_projects_csv", "label": "Development Projects CSV", "global_name": "DEVELOPMENT_PROJECTS", "kind": "file", "default": DEVELOPMENT_PROJECTS},
+    {"key": "development_experiments_csv", "label": "Development Experiments CSV", "global_name": "DEVELOPMENT_EXPERIMENTS", "kind": "file", "default": DEVELOPMENT_EXPERIMENTS},
+    {"key": "experiment_updates_csv", "label": "Experiment Updates CSV", "global_name": "EXPERIMENT_UPDATES", "kind": "file", "default": EXPERIMENT_UPDATES},
+    {"key": "projects_fiber_csv", "label": "Projects Fiber CSV", "global_name": "PROJECTS_FIBER", "kind": "file", "default": PROJECTS_FIBER},
+    {"key": "projects_templates_csv", "label": "Projects Templates CSV", "global_name": "PROJECTS_TEMPLATES", "kind": "file", "default": PROJECTS_TEMPLATES},
+    {"key": "tower_temps_csv", "label": "Tower Temps CSV", "global_name": "TOWER_TEMPS", "kind": "file", "default": TOWER_TEMPS},
+    {"key": "tower_containers_csv", "label": "Tower Containers CSV", "global_name": "TOWER_CONTAINERS", "kind": "file", "default": TOWER_CONTAINERS},
+    {
+        "key": "tower_containers_logger_py",
+        "label": "Tower Containers Logger Script",
+        "global_name": "CONTAINER_LOGGER_SCRIPT",
+        "kind": "file",
+        "default": CONTAINER_LOGGER_SCRIPT,
+    },
+    {"key": "maintenance_state_csv", "label": "Maintenance State CSV", "global_name": "MAINTENANCE_STATE", "kind": "file", "default": MAINTENANCE_STATE},
+    {"key": "maintenance_actions_csv", "label": "Maintenance Actions CSV", "global_name": "MAINTENANCE_ACTIONS", "kind": "file", "default": MAINTENANCE_ACTIONS},
+    {"key": "maintenance_waits_csv", "label": "Maintenance Waits CSV", "global_name": "MAINTENANCE_WAITS", "kind": "file", "default": MAINTENANCE_WAITS},
+    {"key": "maintenance_runtime_json", "label": "Maintenance Runtime JSON", "global_name": "MAINTENANCE_RUNTIME", "kind": "file", "default": MAINTENANCE_RUNTIME},
+    {"key": "maintenance_work_packages_csv", "label": "Maintenance Work Packages CSV", "global_name": "MAINTENANCE_WORK_PACKAGES", "kind": "file", "default": MAINTENANCE_WORK_PACKAGES},
+    {"key": "maintenance_test_presets_json", "label": "Maintenance Test Presets JSON", "global_name": "MAINTENANCE_TEST_PRESETS", "kind": "file", "default": MAINTENANCE_TEST_PRESETS},
+    {"key": "faults_log_csv", "label": "Faults Log CSV", "global_name": "FAULTS_LOG", "kind": "file", "default": FAULTS_LOG},
+    {"key": "faults_actions_csv", "label": "Faults Actions CSV", "global_name": "FAULTS_ACTIONS_LOG", "kind": "file", "default": FAULTS_ACTIONS_LOG},
+    {"key": "coating_config_json", "label": "Coating Config JSON", "global_name": "COATING_CONFIG", "kind": "file", "default": COATING_CONFIG},
+    {"key": "pid_config_json", "label": "PID Config JSON", "global_name": "PID_CONFIG", "kind": "file", "default": PID_CONFIG},
+    {"key": "container_config_json", "label": "Container Config JSON", "global_name": "CONTAINER_CONFIG", "kind": "file", "default": CONTAINER_CONFIG},
+    {"key": "dies_config_json", "label": "Dies Config JSON", "global_name": "DIES_CONFIG", "kind": "file", "default": DIES_CONFIG},
+    {"key": "heater_config_json", "label": "Heater Config JSON", "global_name": "HEATER_CONFIG", "kind": "file", "default": HEATER_CONFIG},
+    {"key": "coating_stock_json", "label": "Coating Stock JSON", "global_name": "COATING_STOCK", "kind": "file", "default": COATING_STOCK},
+    {"key": "container_snapshot_json", "label": "Container Snapshot JSON", "global_name": "CONTAINER_SNAPSHOT", "kind": "file", "default": CONTAINER_SNAPSHOT},
+    {"key": "argon_monthly_report_csv", "label": "Argon Monthly Report CSV", "global_name": "ARGON_MONTHLY_REPORT", "kind": "file", "default": ARGON_MONTHLY_REPORT},
     {"key": "dataset_dir", "label": "Dataset Workspace", "global_name": "DATASET_DIR", "kind": "dir", "default": DATASET_DIR},
     {"key": "logs_dir", "label": "Logs Workspace", "global_name": "LOGS_DIR", "kind": "dir", "default": LOGS_DIR},
     {"key": "reports_dir", "label": "Reports Workspace", "global_name": "REPORTS_DIR", "kind": "dir", "default": REPORTS_DIR},
+    {"key": "report_center_dir", "label": "Report Center Workspace", "global_name": "REPORT_CENTER_DIR", "kind": "dir", "default": REPORT_CENTER_DIR},
+    {"key": "dashboard_plots_dir", "label": "Dashboard Plots Workspace", "global_name": "DASHBOARD_PLOTS_DIR", "kind": "dir", "default": DASHBOARD_PLOTS_DIR},
+    {"key": "maintenance_manual_pages_dir", "label": "Maintenance Manual Pages Workspace", "global_name": "MAINTENANCE_MANUAL_PAGES_DIR", "kind": "dir", "default": MAINTENANCE_MANUAL_PAGES_DIR},
+    {"key": "development_media_dir", "label": "Development Media Workspace", "global_name": "DEVELOPMENT_MEDIA_DIR", "kind": "dir", "default": DEVELOPMENT_MEDIA_DIR},
+    {"key": "manuals_dir", "label": "Manuals Workspace", "global_name": "MANUALS_DIR", "kind": "dir", "default": MANUALS_DIR},
+    {"key": "external_manuals_dir", "label": "External Manuals Workspace", "global_name": "EXTERNAL_MANUALS_DIR", "kind": "dir", "default": EXTERNAL_MANUALS_DIR},
+    {"key": "dashboard_exports_dir", "label": "Dashboard Exports Workspace", "global_name": "DASHBOARD_EXPORTS_DIR", "kind": "dir", "default": DASHBOARD_EXPORTS_DIR},
+    {"key": "manual_page_cache_dir", "label": "Manual Page Cache Workspace", "global_name": "MANUAL_PAGE_CACHE_DIR", "kind": "dir", "default": MANUAL_PAGE_CACHE_DIR},
+    {"key": "maintenance_package_photos_dir", "label": "Maintenance Package Photos", "global_name": "MAINTENANCE_PACKAGE_PHOTOS_DIR", "kind": "dir", "default": MAINTENANCE_PACKAGE_PHOTOS_DIR},
+    {"key": "done_snapshots_dir", "label": "Done Snapshots Workspace", "global_name": "DONE_SNAPSHOTS_DIR", "kind": "dir", "default": DONE_SNAPSHOTS_DIR},
     {"key": "backups_dir", "label": "Backups Workspace", "global_name": "BACKUPS_DIR", "kind": "dir", "default": BACKUPS_DIR},
     {"key": "duckdb_path", "label": "DuckDB File", "global_name": "DUCKDB_PATH", "kind": "file", "default": DUCKDB_PATH},
 )
@@ -389,8 +907,7 @@ def apply_tracked_path_overrides(overrides: dict[str, Path] | None = None) -> No
     module_globals = globals()
     for item in TRACKED_PATH_SPECS:
         module_globals[str(item["global_name"])] = values[str(item["key"])]
-    module_globals["REPORT_CENTER_DIR"] = module_globals["REPORTS_DIR"] / "report_center"
-    module_globals["ARGON_MONTHLY_REPORT"] = module_globals["REPORTS_DIR"] / "gas" / "argon_monthly_report.csv"
+    _PARTS_MANUAL_INDEX_CACHE.clear()
 
 
 def save_tracked_path_overrides(overrides: dict[str, Path]) -> None:
@@ -417,22 +934,256 @@ def current_tracked_paths() -> list[tuple[dict[str, object], Path]]:
     ]
 
 
-apply_tracked_path_overrides(load_tracked_path_overrides())
-ensure_runtime_directories()
+def current_tracked_path_overrides_mtime_ns() -> int | None:
+    try:
+        return TRACKED_PATH_OVERRIDES_FILE.stat().st_mtime_ns
+    except FileNotFoundError:
+        return None
+
+
+_CONTAINER_LOGGER_LOCK = threading.Lock()
+_CONTAINER_LOGGER_PROCESS: subprocess.Popen[str] | None = None
+_CONTAINER_LOGGER_SIGNATURE: tuple[str, ...] | None = None
+_CONTAINER_LOGGER_STATUS: dict[str, object] = {
+    "state": "idle",
+    "message": "Container logger has not started yet.",
+    "pid": None,
+    "python": "",
+    "script": "",
+    "output": "",
+}
+
+
+def _set_container_logger_status(
+    state: str,
+    message: str,
+    *,
+    pid: int | None = None,
+    python_path: Path | None = None,
+    script_path: Path | None = None,
+    output_path: Path | None = None,
+) -> None:
+    global _CONTAINER_LOGGER_STATUS
+    _CONTAINER_LOGGER_STATUS = {
+        "state": str(state or "").strip() or "idle",
+        "message": str(message or "").strip(),
+        "pid": pid,
+        "python": str(python_path or "").strip(),
+        "script": str(script_path or "").strip(),
+        "output": str(output_path or "").strip(),
+    }
+
+
+def current_container_logger_status() -> dict[str, object]:
+    with _CONTAINER_LOGGER_LOCK:
+        process = _CONTAINER_LOGGER_PROCESS
+        signature = _CONTAINER_LOGGER_SIGNATURE
+        status = dict(_CONTAINER_LOGGER_STATUS)
+        if process is not None and process.poll() is not None:
+            signature_parts = tuple(signature or ())
+            python_text = signature_parts[0] if len(signature_parts) > 0 else ""
+            script_text = signature_parts[1] if len(signature_parts) > 1 else ""
+            output_text = signature_parts[2] if len(signature_parts) > 2 else ""
+            status = {
+                "state": "stopped",
+                "message": f"Container logger exited with code {process.returncode}.",
+                "pid": None,
+                "python": python_text,
+                "script": script_text,
+                "output": output_text,
+            }
+        return status
+
+
+def stop_container_logger_process() -> None:
+    global _CONTAINER_LOGGER_PROCESS, _CONTAINER_LOGGER_SIGNATURE
+    with _CONTAINER_LOGGER_LOCK:
+        process = _CONTAINER_LOGGER_PROCESS
+        signature = _CONTAINER_LOGGER_SIGNATURE or ("", "", "")
+        _CONTAINER_LOGGER_PROCESS = None
+        _CONTAINER_LOGGER_SIGNATURE = None
+        if process is None:
+            return
+        if process.poll() is None:
+            try:
+                process.terminate()
+                process.wait(timeout=5)
+            except (OSError, subprocess.SubprocessError):
+                try:
+                    process.kill()
+                    process.wait(timeout=5)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+        _set_container_logger_status(
+            "stopped",
+            "Container logger stopped.",
+            python_path=Path(signature[0]) if signature[0] else None,
+            script_path=Path(signature[1]) if signature[1] else None,
+            output_path=Path(signature[2]) if signature[2] else None,
+        )
+
+
+def cleanup_stray_container_logger_processes(script_path: Path, output_path: Path, keep_pid: int | None = None) -> None:
+    script_text = str(script_path.resolve())
+    output_text = str(output_path.resolve())
+    try:
+        result = subprocess.run(
+            ["ps", "-ax", "-o", "pid=,command="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return
+    if result.returncode != 0:
+        return
+    for raw_line in result.stdout.splitlines():
+        line = str(raw_line or "").strip()
+        if not line:
+            continue
+        try:
+            pid_text, command_text = line.split(None, 1)
+            pid = int(pid_text)
+        except (ValueError, TypeError):
+            continue
+        if keep_pid is not None and pid == keep_pid:
+            continue
+        if "tower_containers_logger.py" not in command_text:
+            continue
+        if script_text not in command_text:
+            continue
+        if output_text not in command_text:
+            continue
+        try:
+            os.kill(pid, 15)
+        except OSError:
+            continue
+
+
+def ensure_container_logger_process(force_restart: bool = False) -> None:
+    global _CONTAINER_LOGGER_PROCESS, _CONTAINER_LOGGER_SIGNATURE
+    script_path = Path(CONTAINER_LOGGER_SCRIPT)
+    output_path = Path(TOWER_CONTAINERS)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if not script_path.exists():
+        stop_container_logger_process()
+        _set_container_logger_status(
+            "blocked",
+            "Container logger script is missing.",
+            script_path=script_path,
+            output_path=output_path,
+        )
+        return
+    helper_python = resolve_helper_python(required_modules=("serial",))
+    if helper_python is None:
+        stop_container_logger_process()
+        _set_container_logger_status(
+            "blocked",
+            "pyserial is not installed for the app Python, so the container logger cannot start yet.",
+            script_path=script_path,
+            output_path=output_path,
+        )
+        return
+    desired_signature = (
+        str(helper_python.resolve()),
+        str(script_path.resolve()),
+        str(output_path.resolve()),
+        str(CONTAINER_LOGGER_SCAN_INTERVAL_SECONDS),
+        str(CONTAINER_LOGGER_LOG_INTERVAL_SECONDS),
+        str(CONTAINER_LOGGER_STALE_THRESHOLD_SECONDS),
+    )
+    with _CONTAINER_LOGGER_LOCK:
+        process = _CONTAINER_LOGGER_PROCESS
+        if process is not None and process.poll() is not None:
+            _CONTAINER_LOGGER_PROCESS = None
+            _CONTAINER_LOGGER_SIGNATURE = None
+            process = None
+        if not force_restart and process is not None and _CONTAINER_LOGGER_SIGNATURE == desired_signature:
+            cleanup_stray_container_logger_processes(script_path, output_path, keep_pid=process.pid)
+            _set_container_logger_status(
+                "running",
+                "Container logger is sampling Arduino tank fill data in the background.",
+                pid=process.pid,
+                python_path=helper_python,
+                script_path=script_path,
+                output_path=output_path,
+            )
+            return
+    stop_container_logger_process()
+    cleanup_stray_container_logger_processes(script_path, output_path)
+    command = [
+        str(helper_python),
+        str(script_path),
+        "--output",
+        str(output_path),
+        "--scan-interval",
+        str(CONTAINER_LOGGER_SCAN_INTERVAL_SECONDS),
+        "--log-interval",
+        str(CONTAINER_LOGGER_LOG_INTERVAL_SECONDS),
+        "--stale-threshold",
+        str(CONTAINER_LOGGER_STALE_THRESHOLD_SECONDS),
+    ]
+    env = dict(os.environ)
+    vendor_python_path = str(VENDOR_DIR)
+    current_python_path = str(env.get("PYTHONPATH", "") or "").strip()
+    env["PYTHONPATH"] = vendor_python_path if not current_python_path else f"{vendor_python_path}{os.pathsep}{current_python_path}"
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=str(ROOT_DIR),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            env=env,
+        )
+    except OSError as exc:
+        _set_container_logger_status(
+            "blocked",
+            f"Container logger failed to start: {exc}",
+            python_path=helper_python,
+            script_path=script_path,
+            output_path=output_path,
+        )
+        return
+    with _CONTAINER_LOGGER_LOCK:
+        _CONTAINER_LOGGER_PROCESS = process
+        _CONTAINER_LOGGER_SIGNATURE = desired_signature
+    _set_container_logger_status(
+        "running",
+        "Container logger is sampling Arduino tank fill data in the background.",
+        pid=process.pid,
+        python_path=helper_python,
+        script_path=script_path,
+        output_path=output_path,
+    )
+
+
+def sync_tracked_path_overrides_if_needed(force: bool = False) -> None:
+    global _TRACKED_PATH_OVERRIDES_MTIME_NS
+    current_mtime = current_tracked_path_overrides_mtime_ns()
+    if not force and current_mtime == _TRACKED_PATH_OVERRIDES_MTIME_NS:
+        return
+    apply_tracked_path_overrides(load_tracked_path_overrides() if current_mtime is not None else {})
+    _TRACKED_PATH_OVERRIDES_MTIME_NS = current_mtime
+    ensure_runtime_directories()
+
+
+sync_tracked_path_overrides_if_needed(force=True)
 
 FULL_BACKUP_INTERVAL = timedelta(days=7)
 FULL_BACKUP_POLICY_LABEL = "Runs inside the app once every 7 days while the app is active"
 FULL_BACKUP_LOCK = threading.Lock()
 
-FULL_BACKUP_SOURCES = (
-    {"label": "Core data", "path": DATA_DIR, "target": "data"},
-    {"label": "Dataset CSVs", "path": DATASET_DIR, "target": "data_set_csv"},
-    {"label": "Logs", "path": LOGS_DIR, "target": "logs"},
-    {"label": "Reports", "path": REPORTS_DIR, "target": "reports"},
-    {"label": "Maintenance", "path": MAINTENANCE_DIR, "target": "maintenance"},
-    {"label": "State", "path": STATE_DIR, "target": "state"},
+FULL_BACKUP_SOURCE_SPECS = (
+    {"label": "Core data", "path_key": "DATA_DIR", "target": "data"},
+    {"label": "Dataset CSVs", "path_key": "DATASET_DIR", "target": "data_set_csv"},
+    {"label": "Logs", "path_key": "LOGS_DIR", "target": "logs"},
+    {"label": "Manuals", "path_key": "MANUALS_DIR", "target": "manuals"},
+    {"label": "Reports", "path_key": "REPORTS_DIR", "target": "reports"},
+    {"label": "Maintenance", "path_key": "MAINTENANCE_DIR", "target": "maintenance"},
+    {"label": "State", "path_key": "STATE_DIR", "target": "state"},
     {"label": "Config", "path": ROOT_DIR / "config", "target": "config"},
-    {"label": "Development media", "path": DEVELOPMENT_MEDIA_DIR, "target": "development_media"},
+    {"label": "Development media", "path_key": "DEVELOPMENT_MEDIA_DIR", "target": "development_media"},
     {"label": "App uploads", "path": STATIC_DIR / "uploads", "target": "tower_rebuild/static/uploads"},
 )
 
@@ -445,10 +1196,103 @@ def path_is_within(candidate: Path, parent: Path) -> bool:
         return False
 
 
+def path_has_entries(path: Path) -> bool:
+    if not path.exists():
+        return False
+    if path.is_file():
+        return True
+    try:
+        next(path.iterdir())
+    except (StopIteration, OSError):
+        return False
+    return True
+
+
+def cleanup_empty_parent_chain(path: Path, stop_at: Path) -> None:
+    current = path
+    stop_resolved = stop_at.resolve()
+    while current.exists():
+        try:
+            if current.resolve() == stop_resolved:
+                break
+        except FileNotFoundError:
+            break
+        try:
+            current.rmdir()
+        except OSError:
+            break
+        current = current.parent
+
+
+def relocate_file_path(label: str, source: Path, destination: Path) -> list[str]:
+    notes: list[str] = []
+    if not source.exists() or source.resolve() == destination.resolve():
+        return notes
+    if source.is_dir():
+        raise ValueError(f"{label} currently points to a folder, not a file.")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists() and destination.resolve() != source.resolve():
+        notes.append(f"{label}: target already exists, so the current file stayed in place.")
+        return notes
+    shutil.move(str(source), str(destination))
+    cleanup_empty_parent_chain(source.parent, ROOT_DIR)
+    notes.append(f"{label}: moved file into {destination}.")
+    return notes
+
+
+def merge_directory_contents(label: str, source: Path, destination: Path) -> list[str]:
+    notes: list[str] = []
+    destination.mkdir(parents=True, exist_ok=True)
+    for child in sorted(source.iterdir(), key=lambda item: item.name.lower()):
+        target_child = destination / child.name
+        if child.is_dir():
+            if target_child.exists() and target_child.is_file():
+                notes.append(f"{label}: kept existing file {target_child.name} and left source folder {child.name} untouched.")
+                continue
+            notes.extend(merge_directory_contents(label, child, target_child))
+            cleanup_empty_parent_chain(child, source)
+            continue
+        if target_child.exists():
+            notes.append(f"{label}: kept existing file {target_child.name} and left the old copy untouched.")
+            continue
+        shutil.move(str(child), str(target_child))
+    cleanup_empty_parent_chain(source, ROOT_DIR)
+    return notes
+
+
+def relocate_directory_path(label: str, source: Path, destination: Path) -> list[str]:
+    notes: list[str] = []
+    if not source.exists() or source.resolve() == destination.resolve():
+        destination.mkdir(parents=True, exist_ok=True)
+        return notes
+    if source.is_file():
+        raise ValueError(f"{label} currently points to a file, not a folder.")
+    source_resolved = source.resolve()
+    destination_resolved = destination.resolve()
+    if path_is_within(destination_resolved, source_resolved) or path_is_within(source_resolved, destination_resolved):
+        raise ValueError(f"{label} cannot move into a nested folder of itself.")
+    notes.extend(merge_directory_contents(label, source, destination))
+    notes.append(f"{label}: moved folder contents into {destination}.")
+    return notes
+
+
+def relocate_tracked_path(spec: dict[str, object], source: Path, destination: Path) -> list[str]:
+    label = str(spec["label"])
+    kind = str(spec["kind"])
+    if kind == "dir":
+        return relocate_directory_path(label, source, destination)
+    return relocate_file_path(label, source, destination)
+
+
 def build_full_backup_sources() -> list[dict[str, object]]:
+    module_globals = globals()
     sources = [
-        {"label": str(item["label"]), "path": Path(item["path"]), "target": str(item["target"])}
-        for item in FULL_BACKUP_SOURCES
+        {
+            "label": str(item["label"]),
+            "path": Path(module_globals[str(item["path_key"])]) if item.get("path_key") else Path(item["path"]),
+            "target": str(item["target"]),
+        }
+        for item in FULL_BACKUP_SOURCE_SPECS
     ]
     covered_dirs = [Path(item["path"]).resolve() for item in sources if Path(item["path"]).exists() and Path(item["path"]).is_dir()]
     covered_files = {Path(item["path"]).resolve() for item in sources if Path(item["path"]).exists() and Path(item["path"]).is_file()}
@@ -534,7 +1378,7 @@ def create_full_backup_snapshot(trigger: str = "manual") -> dict[str, object]:
         "copied": copied,
         "missing": missing,
     }
-    (snapshot_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    write_json_value(snapshot_dir / "manifest.json", manifest)
     return {
         "name": snapshot_dir.name,
         "path": str(snapshot_dir),
@@ -646,6 +1490,10 @@ def get_maintenance_runtime() -> dict[str, float]:
             runtime[key] = float(stored.get(source_map[key], default))
         except (TypeError, ValueError):
             runtime[key] = float(default)
+    try:
+        runtime["draw_count"] = float(len(list_dataset_csv_files()))
+    except Exception:
+        runtime["draw_count"] = float(runtime.get("draw_count", 0.0) or 0.0)
     return runtime
 
 
@@ -712,6 +1560,289 @@ def read_maintenance_tracker_rows() -> list[dict[str, str]]:
     return rows
 
 
+MAINTENANCE_SOURCE_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "Task_ID": ("Task_ID", "Task ID"),
+    "Component": ("Component", "Equipment"),
+    "Task": ("Task", "Task Name"),
+    "Task_Group": ("Task_Group", "Group"),
+    "Task_Groups": ("Task_Groups", "Task_Group", "Group"),
+    "Required_Parts": ("Required_Parts", "Required Parts"),
+    "Required_Tools": ("Required_Tools", "Required Tools"),
+    "Mandatory_Parts": ("Mandatory_Parts", "Mandatory Parts"),
+    "Conditional_Parts": ("Conditional_Parts", "Conditional Parts"),
+    "Preparation_Lead_Days": ("Preparation_Lead_Days", "Preparation Lead Days"),
+    "Parts_Check_Lead_Days": ("Parts_Check_Lead_Days", "Parts Check Lead Days"),
+    "Auto_Order_Mandatory_Parts": ("Auto_Order_Mandatory_Parts", "Auto Order Mandatory Parts"),
+    "Tracking_Mode": ("Tracking_Mode", "Tracking Mode"),
+    "Hours Source": ("Hours Source", "Hours_Source"),
+    "Interval Type": ("Interval Type",),
+    "Interval Value": ("Interval Value",),
+    "Interval Unit": ("Interval Unit",),
+    "Planning_Window_Months": ("Planning_Window_Months", "Planning months"),
+    "Due Threshold (days)": ("Due Threshold (days)",),
+    "Trigger Context": ("Trigger Context",),
+    "Trigger_Modes": ("Trigger_Modes", "Trigger Modes"),
+    "Trigger_Hours_Source": ("Trigger_Hours_Source", "Trigger Hours Source"),
+    "Trigger_Hours_Interval": ("Trigger_Hours_Interval", "Trigger Hours Interval"),
+    "Trigger_Draws_Interval": ("Trigger_Draws_Interval", "Trigger Draws Interval"),
+    "Trigger_Calendar_Value": ("Trigger_Calendar_Value", "Trigger Calendar Value"),
+    "Trigger_Calendar_Unit": ("Trigger_Calendar_Unit", "Trigger Calendar Unit"),
+    "Calendar Rule": ("Calendar Rule",),
+    "Owner": ("Owner",),
+    "Manual_Name": ("Manual_Name", "Document Name"),
+    "Page": ("Page", "Manual Page"),
+    "Document": ("Document", "Document File/Link"),
+    "Last_Done_Date": ("Last_Done_Date", "Last Done Date"),
+    "Last_Done_Hours": ("Last_Done_Hours", "Last Done Hours"),
+    "Last_Done_Draw": ("Last_Done_Draw", "Last Done Draw"),
+    "Last_Done_Hours_UV1": ("Last_Done_Hours_UV1", "Last Done Hours UV1", "Last Done UV1 Hours"),
+    "Last_Done_Hours_UV2": ("Last_Done_Hours_UV2", "Last Done Hours UV2", "Last Done UV2 Hours"),
+    "Last_Done_Hours_Furnace": ("Last_Done_Hours_Furnace", "Last Done Hours Furnace", "Last Done Furnace Hours"),
+    "Procedure Summary": ("Procedure Summary",),
+    "Safety/Notes": ("Safety/Notes",),
+    "Test_Preset": ("Test_Preset", "Test Preset"),
+    "Test_Fields": ("Test_Fields", "Test Fields"),
+    "Test_Thresholds": ("Test_Thresholds", "Test Thresholds"),
+    "Test_Condition": ("Test_Condition", "Test Condition"),
+    "Test_Action": ("Test_Action", "Test Action"),
+}
+
+
+def maintenance_field_aliases(name: str) -> tuple[str, ...]:
+    return MAINTENANCE_SOURCE_FIELD_ALIASES.get(name, (name,))
+
+
+def first_task_value(row: dict[str, str], *names: str) -> str:
+    for name in names:
+        value = str(row.get(name, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def load_maintenance_test_preset_library() -> dict[str, dict]:
+    data = read_json_value(MAINTENANCE_TEST_PRESETS, {})
+    return data if isinstance(data, dict) else {}
+
+
+def resolve_maintenance_source_column(columns, logical_name: str) -> str:
+    available = {str(column): column for column in columns}
+    for alias in maintenance_field_aliases(logical_name):
+        if alias in available:
+            return alias
+    return maintenance_field_aliases(logical_name)[0]
+
+
+def find_maintenance_source_row_mask(df: pd.DataFrame, task_id: str, component: str, task: str) -> pd.Series:
+    mask = pd.Series([False] * len(df), index=df.index)
+    safe_task_id = str(task_id or "").strip()
+    safe_component = str(component or "").strip().lower()
+    safe_task = str(task or "").strip().lower()
+    if safe_task_id:
+        for column_name in maintenance_field_aliases("Task_ID"):
+            if column_name in df.columns:
+                mask = df[column_name].astype(str).str.strip().eq(safe_task_id)
+                if mask.any():
+                    return mask
+    component_columns = [name for name in maintenance_field_aliases("Component") if name in df.columns]
+    task_columns = [name for name in maintenance_field_aliases("Task") if name in df.columns]
+    for component_column in component_columns:
+        for task_column in task_columns:
+            mask = (
+                df[component_column].astype(str).str.strip().str.lower().eq(safe_component)
+                & df[task_column].astype(str).str.strip().str.lower().eq(safe_task)
+            )
+            if mask.any():
+                return mask
+    return mask
+
+
+def update_maintenance_source_task(source_file: str, task_id: str, component: str, task: str, updates: dict[str, object]) -> None:
+    source_name = str(source_file or "").strip()
+    if not source_name:
+        raise ValueError("Task source file is missing.")
+    path = MAINTENANCE_DIR / source_name
+    if not path.exists():
+        raise FileNotFoundError(f"Maintenance source file not found: {path}")
+    suffix = path.suffix.lower()
+    if suffix in {".xlsx", ".xls"}:
+        df = pd.read_excel(path)
+    elif suffix == ".csv":
+        df = pd.read_csv(path)
+    else:
+        raise ValueError(f"Unsupported maintenance source type: {path.suffix}")
+    mask = find_maintenance_source_row_mask(df, task_id, component, task)
+    if not mask.any():
+        raise ValueError("Task row was not found in the maintenance source file.")
+    for logical_name, raw_value in updates.items():
+        column_name = resolve_maintenance_source_column(df.columns, logical_name)
+        if column_name not in df.columns:
+            df[column_name] = ""
+        df.loc[mask, column_name] = raw_value
+    if suffix in {".xlsx", ".xls"}:
+        write_dataframe_atomic(path, df)
+    else:
+        write_dataframe_atomic(path, df)
+
+
+def delete_maintenance_source_task(source_file: str, task_id: str, component: str, task: str) -> None:
+    source_name = str(source_file or "").strip()
+    if not source_name:
+        raise ValueError("Task source file is missing.")
+    path = MAINTENANCE_DIR / source_name
+    if not path.exists():
+        raise FileNotFoundError(f"Maintenance source file not found: {path}")
+    suffix = path.suffix.lower()
+    if suffix in {".xlsx", ".xls"}:
+        df = pd.read_excel(path)
+    elif suffix == ".csv":
+        df = pd.read_csv(path)
+    else:
+        raise ValueError(f"Unsupported maintenance source type: {path.suffix}")
+    mask = find_maintenance_source_row_mask(df, task_id, component, task)
+    if not mask.any():
+        raise ValueError("Task row was not found in the maintenance source file.")
+    df = df.loc[~mask].copy()
+    if suffix in {".xlsx", ".xls"}:
+        write_dataframe_atomic(path, df)
+    else:
+        write_dataframe_atomic(path, df)
+
+
+def maintenance_task_id_prefix_for_component(df: pd.DataFrame, component: str) -> str:
+    task_id_columns = [name for name in maintenance_field_aliases("Task_ID") if name in df.columns]
+    component_columns = [name for name in maintenance_field_aliases("Component") if name in df.columns]
+    safe_component = str(component or "").strip().lower()
+
+    def extract_prefix(raw_task_id: object) -> str:
+        safe_value = str(raw_task_id or "").strip()
+        match = re.match(r"^(.*?)[-_]?(\d+)$", safe_value)
+        return match.group(1).rstrip("-_") if match else ""
+
+    component_prefixes: dict[str, int] = {}
+    if safe_component and task_id_columns and component_columns:
+        for component_column in component_columns:
+            for task_id_column in task_id_columns:
+                for _, row in df.iterrows():
+                    row_component = str(row.get(component_column, "")).strip().lower()
+                    if row_component != safe_component:
+                        continue
+                    prefix = extract_prefix(row.get(task_id_column, ""))
+                    if prefix:
+                        component_prefixes[prefix] = component_prefixes.get(prefix, 0) + 1
+    if component_prefixes:
+        return sorted(component_prefixes.items(), key=lambda item: (-item[1], -len(item[0]), item[0]))[0][0]
+
+    all_prefixes: dict[str, int] = {}
+    for task_id_column in task_id_columns:
+        for raw_value in df.get(task_id_column, []):
+            prefix = extract_prefix(raw_value)
+            if prefix:
+                all_prefixes[prefix] = all_prefixes.get(prefix, 0) + 1
+    if len(all_prefixes) == 1:
+        return next(iter(all_prefixes))
+
+    words = [token for token in re.findall(r"[A-Za-z0-9]+", str(component or "")) if token]
+    if not words:
+        return "GEN-MNT"
+    initials = "".join(token[0].upper() for token in words[:3])
+    return f"{initials or 'GEN'}-MNT"
+
+
+def generate_next_maintenance_task_id(df: pd.DataFrame, component: str) -> str:
+    prefix = maintenance_task_id_prefix_for_component(df, component)
+    task_id_columns = [name for name in maintenance_field_aliases("Task_ID") if name in df.columns]
+    max_value = 0
+    for task_id_column in task_id_columns:
+        for raw_value in df.get(task_id_column, []):
+            safe_value = str(raw_value or "").strip()
+            match = re.match(rf"^{re.escape(prefix)}[-_]?(\d+)$", safe_value, re.IGNORECASE)
+            if not match:
+                continue
+            try:
+                max_value = max(max_value, int(match.group(1)))
+            except ValueError:
+                continue
+    return f"{prefix}-{max_value + 1:03d}"
+
+
+def create_maintenance_source_task(
+    source_file: str,
+    component: str,
+    task: str,
+    task_group: str,
+) -> dict[str, str]:
+    source_name = str(source_file or "").strip()
+    if not source_name:
+        raise ValueError("Task source file is required.")
+    path = MAINTENANCE_DIR / source_name
+    if not path.exists():
+        raise FileNotFoundError(f"Maintenance source file not found: {path}")
+    suffix = path.suffix.lower()
+    if suffix in {".xlsx", ".xls"}:
+        df = pd.read_excel(path)
+    elif suffix == ".csv":
+        df = pd.read_csv(path)
+    else:
+        raise ValueError(f"Unsupported maintenance source type: {path.suffix}")
+
+    safe_component = str(component or "").strip() or "General"
+    safe_task = str(task or "").strip()
+    safe_group = str(task_group or "").strip() or "General"
+    if not safe_task:
+        raise ValueError("Task name is required.")
+
+    existing_mask = find_maintenance_source_row_mask(df, "", safe_component, safe_task)
+    if existing_mask.any():
+        raise ValueError("A task with the same component and task name already exists in that source file.")
+
+    required_logical_fields = [
+        "Task_ID",
+        "Component",
+        "Task",
+        "Task_Group",
+        "Task_Groups",
+        "Tracking_Mode",
+        "Required_Parts",
+        "Required_Tools",
+        "Mandatory_Parts",
+        "Conditional_Parts",
+        "Preparation_Lead_Days",
+        "Parts_Check_Lead_Days",
+        "Auto_Order_Mandatory_Parts",
+        "Owner",
+        "Manual_Name",
+        "Page",
+        "Document",
+        "Procedure Summary",
+        "Safety/Notes",
+    ]
+    for logical_name in required_logical_fields:
+        column_name = resolve_maintenance_source_column(df.columns, logical_name)
+        if column_name not in df.columns:
+            df[column_name] = ""
+
+    task_id = generate_next_maintenance_task_id(df, safe_component)
+    new_row = {str(column): "" for column in df.columns}
+    new_row[resolve_maintenance_source_column(df.columns, "Task_ID")] = task_id
+    new_row[resolve_maintenance_source_column(df.columns, "Component")] = safe_component
+    new_row[resolve_maintenance_source_column(df.columns, "Task")] = safe_task
+    new_row[resolve_maintenance_source_column(df.columns, "Task_Group")] = safe_group
+    task_groups_column = resolve_maintenance_source_column(df.columns, "Task_Groups")
+    if task_groups_column in new_row:
+        new_row[task_groups_column] = safe_group
+
+    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+    write_dataframe_atomic(path, df)
+    return {
+        "task_id": task_id,
+        "component": safe_component,
+        "task": safe_task,
+        "task_group": safe_group,
+        "source_file": source_name,
+    }
+
+
 def split_required_parts(value: str | None) -> list[str]:
     text = str(value or "").replace("\n", ";").replace("/", ";")
     output = []
@@ -732,6 +1863,23 @@ def dedupe_strings(values: list[str]) -> list[str]:
         seen.add(item)
         output.append(item)
     return output
+
+
+def is_tool_like_part_name(part_name: str) -> bool:
+    lowered = str(part_name or "").strip().lower()
+    if not lowered:
+        return False
+    tool_tokens = [
+        "cleaning kit",
+        "cleaning cloth",
+        "tool",
+        "wrench",
+        "screwdriver",
+        "hex key",
+        "allen key",
+        "spanner",
+    ]
+    return any(token in lowered for token in tool_tokens)
 
 
 def ensure_parts_company(company_name: str) -> None:
@@ -760,14 +1908,308 @@ def to_float(value: str | None) -> float:
         return 0.0
 
 
+def to_int(value: str | None, default: int = 0) -> int:
+    if value in (None, ""):
+        return default
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _process_setup_match_key(name: str, keys: list[str]) -> str | None:
+    raw = str(name or "").strip()
+    if not raw:
+        return None
+    lowered = raw.lower()
+    for key in keys:
+        if str(key).strip().lower() == lowered:
+            return key
+    for key in keys:
+        option = str(key).strip().lower()
+        if lowered in option or option in lowered:
+            return key
+    return None
+
+
+def _process_setup_interpolate_linear(x: float, points: list[tuple[float, float]]) -> float:
+    if not points:
+        return 1.0
+    pts = sorted(points, key=lambda item: item[0])
+    if x <= pts[0][0]:
+        return pts[0][1]
+    if x >= pts[-1][0]:
+        return pts[-1][1]
+    for left, right in zip(pts, pts[1:]):
+        x0, y0 = left
+        x1, y1 = right
+        if x0 <= x <= x1:
+            span = x1 - x0
+            if span <= 0:
+                return y0
+            ratio = (x - x0) / span
+            return y0 + ((y1 - y0) * ratio)
+    return pts[-1][1]
+
+
+def _process_setup_coating_viscosity_kg_m_s(coating_name: str, temp_c: float, coating_cfg: dict) -> float:
+    coatings = (coating_cfg or {}).get("coatings", {}) or {}
+    match = _process_setup_match_key(coating_name, list(coatings.keys()))
+    coating_entry = coatings.get(match, {}) if match else {}
+    configured = to_float((coating_entry or {}).get("Viscosity"))
+    if configured > 0:
+        return configured
+    normalized = str(match or coating_name or "").strip().upper().replace("_", "").replace("-", "")
+    if "DP1032" in normalized:
+        return max(0.01, (34.884 * math.exp(-0.0806 * float(temp_c))) - 0.162)
+    ds_points = [
+        (25.0, 5.9),
+        (30.0, 3.5),
+        (35.0, 2.04),
+        (40.0, 1.2),
+        (45.0, 0.7),
+        (50.0, 0.4),
+        (55.0, 0.25),
+    ]
+    return max(0.01, _process_setup_interpolate_linear(float(temp_c), ds_points))
+
+
+def _process_setup_calculate_coated_diameter_um(
+    entry_fiber_diameter_um: float,
+    die_diameter_um: float,
+    mu_kg_m_s: float,
+    rho_kg_m3: float,
+    neck_length_m: float,
+    pulling_speed_m_s: float,
+    g_m_s2: float = 9.80665,
+) -> float:
+    entry_um = to_float(entry_fiber_diameter_um)
+    die_um = to_float(die_diameter_um)
+    mu = to_float(mu_kg_m_s)
+    rho = to_float(rho_kg_m3)
+    neck_length = to_float(neck_length_m)
+    speed = to_float(pulling_speed_m_s)
+    gravity = to_float(g_m_s2) or 9.80665
+    if entry_um <= 0 or die_um <= 0 or mu <= 0 or rho <= 0 or neck_length <= 0 or speed <= 0:
+        return entry_um
+
+    die_radius_m = (die_um / 2.0) * 1e-6
+    fiber_radius_m = (entry_um / 2.0) * 1e-6
+    if fiber_radius_m <= 0 or die_radius_m <= 0 or fiber_radius_m >= die_radius_m:
+        return entry_um
+
+    ratio = fiber_radius_m / die_radius_m
+    try:
+        ratio_log = math.log(ratio)
+    except ValueError:
+        return entry_um
+    if ratio_log == 0:
+        return entry_um
+
+    delta_p = neck_length * rho * gravity
+    phi = (delta_p * (die_radius_m**2)) / (8.0 * mu * neck_length * speed)
+    term1 = phi * (
+        1.0 - ratio**4 + (((1.0 - ratio**2) ** 2) / ratio_log)
+    )
+    term2 = -(ratio**2 + ((1.0 - ratio**2) / (2.0 * ratio_log)))
+    inside = term1 + term2 + ratio**2
+    if inside <= 0:
+        return entry_um
+
+    thickness_m = die_radius_m * (math.sqrt(inside) - ratio)
+    return entry_um + (thickness_m * 2.0 * 1e6)
+
+
+def _process_setup_stocked_die_names(coating_cfg: dict, dies_map: dict) -> list[str]:
+    config_dies = (coating_cfg or {}).get("dies", {}) or {}
+    if not isinstance(dies_map, dict) or not config_dies:
+        return []
+    sizes: list[float] = []
+    for row in dies_map.values():
+        if not isinstance(row, dict):
+            continue
+        for key in ("entry_die_um", "primary_die_um"):
+            size = to_float(row.get(key))
+            if size > 0:
+                sizes.append(size)
+    stocked: list[str] = []
+    for size in sizes:
+        best_name = ""
+        best_gap = float("inf")
+        for die_name, die_cfg in config_dies.items():
+            die_diameter = to_float((die_cfg or {}).get("Die_Diameter"))
+            if die_diameter <= 0:
+                continue
+            gap = abs(die_diameter - size)
+            if gap < best_gap:
+                best_gap = gap
+                best_name = str(die_name)
+        if best_name and best_gap <= 15:
+            stocked.append(best_name)
+    return dedupe_strings(stocked)
+
+
+def auto_select_process_setup_dies_action(payload: dict) -> JsonResponse:
+    coating_payload = payload.get("coating") or {}
+    if not isinstance(coating_payload, dict):
+        coating_payload = {}
+
+    entry_um = to_float(coating_payload.get("entry_fiber_diameter_um"))
+    target_first_um = to_float(coating_payload.get("target_first_coating_diameter_um"))
+    target_second_um = to_float(coating_payload.get("target_second_coating_diameter_um"))
+    primary_temp_c = to_float(coating_payload.get("primary_temp_c"))
+    secondary_temp_c = to_float(coating_payload.get("secondary_temp_c"))
+    draw_speed_m_min = to_float(coating_payload.get("draw_speed_m_min"))
+    primary_coating = str(coating_payload.get("primary_coating", "")).strip()
+    secondary_coating = str(coating_payload.get("secondary_coating", "")).strip()
+
+    missing: list[str] = []
+    if entry_um <= 0:
+        missing.append("Entry fiber diameter")
+    if target_first_um <= 0:
+        missing.append("Target first coating diameter")
+    if target_second_um <= 0:
+        missing.append("Target second coating diameter")
+    if not primary_coating:
+        missing.append("Primary coating")
+    if not secondary_coating:
+        missing.append("Secondary coating")
+    if primary_temp_c <= 0:
+        missing.append("Primary temperature")
+    if secondary_temp_c <= 0:
+        missing.append("Secondary temperature")
+    if draw_speed_m_min <= 0:
+        missing.append("Draw speed")
+    if missing:
+        return JsonResponse(
+            {
+                "ok": True,
+                "ready": False,
+                "message": f"Fill {', '.join(missing)} to auto-pick dies.",
+                "missing": missing,
+            },
+            200,
+        )
+
+    coating_cfg = read_json_dict(COATING_CONFIG)
+    dies_cfg = read_json_dict(DIES_CONFIG)
+    config_dies = (coating_cfg or {}).get("dies", {}) or {}
+    coatings = (coating_cfg or {}).get("coatings", {}) or {}
+    primary_key = _process_setup_match_key(primary_coating, list(coatings.keys()))
+    secondary_key = _process_setup_match_key(secondary_coating, list(coatings.keys()))
+    if not primary_key or not secondary_key:
+        return JsonResponse(
+            {
+                "ok": False,
+                "message": "Could not match the selected coating names to the coating guide config.",
+            },
+            400,
+        )
+    if not config_dies:
+        return JsonResponse({"ok": False, "message": "No dies are configured in config_coating.json."}, 400)
+
+    stocked_die_names = _process_setup_stocked_die_names(coating_cfg, dies_cfg)
+    die_catalog_names = stocked_die_names if len(stocked_die_names) >= 2 else dedupe_strings(list(config_dies.keys()))
+    using_stock_only = len(stocked_die_names) >= 2
+
+    mu1 = _process_setup_coating_viscosity_kg_m_s(primary_key, primary_temp_c, coating_cfg)
+    mu2 = _process_setup_coating_viscosity_kg_m_s(secondary_key, secondary_temp_c, coating_cfg)
+    rho1 = to_float((coatings.get(primary_key) or {}).get("Density")) or 1000.0
+    rho2 = to_float((coatings.get(secondary_key) or {}).get("Density")) or 1000.0
+    speed_m_s = draw_speed_m_min / 60.0 if draw_speed_m_min > 0 else 0.917
+
+    best_primary = ""
+    best_secondary = ""
+    best_fc = 0.0
+    best_sc = 0.0
+    best_score = float("inf")
+    best_primary_die_um = 0.0
+    best_secondary_die_um = 0.0
+
+    for primary_name in die_catalog_names:
+        primary_cfg = config_dies.get(primary_name, {}) or {}
+        primary_die_um = to_float(primary_cfg.get("Die_Diameter"))
+        primary_neck_length = to_float(primary_cfg.get("Neck_Length")) or 0.002
+        if primary_die_um <= 0:
+            continue
+        predicted_fc = _process_setup_calculate_coated_diameter_um(
+            entry_fiber_diameter_um=entry_um,
+            die_diameter_um=primary_die_um,
+            mu_kg_m_s=mu1,
+            rho_kg_m3=rho1,
+            neck_length_m=primary_neck_length,
+            pulling_speed_m_s=speed_m_s,
+        )
+        for secondary_name in die_catalog_names:
+            secondary_cfg = config_dies.get(secondary_name, {}) or {}
+            secondary_die_um = to_float(secondary_cfg.get("Die_Diameter"))
+            secondary_neck_length = to_float(secondary_cfg.get("Neck_Length")) or 0.002
+            if secondary_die_um <= 0:
+                continue
+            predicted_sc = _process_setup_calculate_coated_diameter_um(
+                entry_fiber_diameter_um=predicted_fc,
+                die_diameter_um=secondary_die_um,
+                mu_kg_m_s=mu2,
+                rho_kg_m3=rho2,
+                neck_length_m=secondary_neck_length,
+                pulling_speed_m_s=speed_m_s,
+            )
+            score = ((predicted_fc - target_first_um) ** 2) + ((predicted_sc - target_second_um) ** 2)
+            if score < best_score:
+                best_score = score
+                best_primary = str(primary_name)
+                best_secondary = str(secondary_name)
+                best_fc = float(predicted_fc)
+                best_sc = float(predicted_sc)
+                best_primary_die_um = primary_die_um
+                best_secondary_die_um = secondary_die_um
+
+    if not best_primary or not best_secondary:
+        return JsonResponse({"ok": False, "message": "Could not evaluate a valid die pair."}, 400)
+
+    stock_note = using_stock_only
+    source_note = (
+        f"Auto picked from {len(die_catalog_names)} stocked dies."
+        if stock_note
+        else f"Auto picked from full die catalog ({len(die_catalog_names)} dies) because stocked die setup is incomplete."
+    )
+    details = {
+        "primary_die": best_primary,
+        "secondary_die": best_secondary,
+        "predicted_first_um": round(best_fc, 2),
+        "predicted_second_um": round(best_sc, 2),
+        "ideal_primary_die_um": round(best_primary_die_um, 1),
+        "ideal_secondary_die_um": round(best_secondary_die_um, 1),
+        "source_note": source_note,
+        "using_stock_only": using_stock_only,
+        "catalog_count": len(die_catalog_names),
+        "stocked_die_names": stocked_die_names,
+        "error_first_um": round(best_fc - target_first_um, 2),
+        "error_second_um": round(best_sc - target_second_um, 2),
+        "primary_coating": primary_key,
+        "secondary_coating": secondary_key,
+    }
+    return JsonResponse(
+        {
+            "ok": True,
+            "ready": True,
+            "message": source_note,
+            "auto_dies": details,
+        },
+        200,
+    )
+
+
 def parse_dt(value: str | None) -> datetime | None:
     if not value:
         return None
     for fmt in (
         "%Y-%m-%d %H:%M:%S.%f",
         "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
         "%Y-%m-%dT%H:%M:%S.%f",
         "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
         "%m/%d/%Y %H:%M:%S",
         "%m/%d/%Y %H:%M",
         "%m/%d/%Y",
@@ -825,6 +2267,140 @@ def next_recurrence_dt(dt: datetime, recurrence: str) -> datetime:
     return dt
 
 
+def normalize_maintenance_hours_source(value: str | None) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"uv1", "uv 1", "uv_system_1", "uv system 1", "system1", "system 1"}:
+        return "uv1"
+    if text in {"uv2", "uv 2", "uv_system_2", "uv system 2", "system2", "system 2"}:
+        return "uv2"
+    return "furnace"
+
+
+def maintenance_runtime_hours_for_source(source: str, runtime_context: dict) -> float:
+    key = normalize_maintenance_hours_source(source)
+    if key == "uv1":
+        return float(runtime_context.get("uv1_hours", 0.0) or 0.0)
+    if key == "uv2":
+        return float(runtime_context.get("uv2_hours", 0.0) or 0.0)
+    return float(runtime_context.get("furnace_hours", 0.0) or 0.0)
+
+
+def maintenance_last_done_updates(source: str, runtime_context: dict) -> dict[str, object]:
+    hours_value = round(maintenance_runtime_hours_for_source(source, runtime_context), 3)
+    draw_value = int(round(float(runtime_context.get("draw_count", 0.0) or 0.0)))
+    date_label = datetime.now().strftime("%Y-%m-%d")
+    updates: dict[str, object] = {
+        "Last_Done_Date": date_label,
+        "Last_Done_Hours": hours_value,
+        "Last_Done_Draw": draw_value,
+    }
+    source_key = normalize_maintenance_hours_source(source)
+    if source_key == "uv1":
+        updates["Last_Done_Hours_UV1"] = hours_value
+    elif source_key == "uv2":
+        updates["Last_Done_Hours_UV2"] = hours_value
+    else:
+        updates["Last_Done_Hours_Furnace"] = hours_value
+    return updates
+
+
+def infer_maintenance_recurrence_from_task(task_row: dict[str, str]) -> str:
+    direct = normalize_recurrence(first_task_value(task_row, "Calendar Rule"))
+    if direct != "none":
+        return direct
+    try:
+        interval_value = float(first_task_value(task_row, "Trigger_Calendar_Value", "Interval Value", "Interval_Value") or 0)
+    except (TypeError, ValueError):
+        interval_value = 0.0
+    unit = first_task_value(task_row, "Trigger_Calendar_Unit", "Interval Unit", "Interval_Unit").strip().lower()
+    if "week" in unit and interval_value >= 1:
+        return "weekly"
+    if "month" in unit:
+        if abs(interval_value - 1.0) < 0.01:
+            return "monthly"
+        if abs(interval_value - 3.0) < 0.01:
+            return "quarterly"
+        if abs(interval_value - 6.0) < 0.01:
+            return "semiannual"
+        if abs(interval_value - 12.0) < 0.01:
+            return "yearly"
+    if "year" in unit and interval_value >= 1:
+        return "yearly"
+    return "none"
+
+
+def find_maintenance_task_record(task_id: str, component: str, task: str) -> dict[str, str] | None:
+    safe_task_id = str(task_id or "").strip()
+    safe_component = str(component or "").strip().lower()
+    safe_task = str(task or "").strip().lower()
+    for row in read_maintenance_tracker_rows():
+        row_task_id = str(row.get("Task_ID", "") or row.get("Task ID", "")).strip()
+        row_component = str(row.get("Component", "") or row.get("Equipment", "")).strip().lower()
+        row_task = str(row.get("Task", "") or row.get("Task Name", "")).strip().lower()
+        if safe_task_id and row_task_id == safe_task_id:
+            return row
+        if row_component == safe_component and row_task == safe_task:
+            return row
+    return None
+
+
+def build_maintenance_due_lookup(runtime_context: dict) -> dict[str, dict[str, object]]:
+    due_lookup: dict[str, dict[str, object]] = {}
+    def due_meta_score(entry: dict[str, object]) -> int:
+        score = 0
+        next_due_date = str(entry.get("next_due_date", "") or "").strip()
+        next_due_hours = entry.get("next_due_hours")
+        next_due_draw = entry.get("next_due_draw")
+        timing_status = str(entry.get("timing_status", "") or "").strip().upper()
+        hours_source = str(entry.get("hours_source", "") or "").strip()
+        if next_due_date:
+            score += 4
+        if next_due_hours is not None and not pd.isna(next_due_hours):
+            score += 4
+        if next_due_draw is not None and not pd.isna(next_due_draw):
+            score += 4
+        if timing_status and timing_status != "ROUTINE":
+            score += 1
+        if hours_source:
+            score += 1
+        return score
+    try:
+        helper_df = load_maintenance_folder_df(str(MAINTENANCE_DIR))
+        helper_status_df = compute_maintenance_status_df(
+            helper_df,
+            current_draw_count=int(runtime_context["draw_count"]),
+            furnace_hours=float(runtime_context["furnace_hours"]),
+            uv1_hours=float(runtime_context["uv1_hours"]),
+            uv2_hours=float(runtime_context["uv2_hours"]),
+            warn_days=int(runtime_context["warn_days"]),
+            warn_hours=float(runtime_context["warn_hours"]),
+            current_date=runtime_context["current_date"],
+        )
+        for _, helper_row in helper_status_df.iterrows():
+            task_id = str(helper_row.get("Task_ID", "")).strip()
+            component = str(helper_row.get("Component", "")).strip().lower()
+            task = str(helper_row.get("Task", "")).strip().lower()
+            helper_key = task_id or f"{component}::{task}"
+            if not helper_key:
+                continue
+            next_due_date = helper_row.get("Next_Due_Date")
+            if hasattr(next_due_date, "isoformat"):
+                next_due_date = next_due_date.isoformat()
+            candidate = {
+                "next_due_date": str(next_due_date or "").strip(),
+                "next_due_hours": helper_row.get("Next_Due_Hours"),
+                "next_due_draw": helper_row.get("Next_Due_Draw"),
+                "timing_status": str(helper_row.get("Status", "")).strip(),
+                "hours_source": str(helper_row.get("Hours_Source", "")).strip(),
+            }
+            existing = due_lookup.get(helper_key)
+            if existing is None or due_meta_score(candidate) >= due_meta_score(existing):
+                due_lookup[helper_key] = candidate
+    except Exception:
+        return {}
+    return due_lookup
+
+
 def month_start(dt: datetime) -> datetime:
     return dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
@@ -876,11 +2452,65 @@ def build_demo_schedule_events(anchor: datetime) -> list[dict]:
 
 def summarize_draw_orders() -> dict:
     rows = read_csv_rows(DRAW_ORDERS)
+    fieldnames = read_csv_fieldnames(DRAW_ORDERS)
     status_counts: dict[str, int] = {}
+    raw_status_counts: dict[str, int] = {}
     recent = []
     monthly_counts: dict[str, int] = {}
+    changed = False
+    now = datetime.now()
+
+    def tm_moved(value: object) -> bool:
+        return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
+
+    def dataset_snapshot_kv(csv_name: str | None) -> dict[str, str]:
+        path = resolve_dataset_csv_path(str(csv_name or "").strip())
+        if not path or not path.exists():
+            return {}
+        kv: dict[str, str] = {}
+        for snapshot_row in read_csv_rows(path):
+            key = str(snapshot_row.get("Parameter Name") or "").strip()
+            if not key or key in kv:
+                continue
+            kv[key] = str(snapshot_row.get("Value") or "").strip()
+        return kv
+
+    def infer_done_dt(row: dict[str, str]) -> datetime | None:
+        direct_done = parse_dt(row.get("Done Timestamp"))
+        if direct_done:
+            return direct_done
+        csv_name = row.get("Assigned Dataset CSV", "") or row.get("Done CSV", "") or row.get("Active CSV", "")
+        kv = dataset_snapshot_kv(csv_name)
+        for key in (
+            "Order__Draw Date",
+            "Draw Date",
+            "Process__Process Setup Timestamp",
+            "Process Setup Timestamp",
+        ):
+            inferred = parse_dt(kv.get(key))
+            if inferred:
+                return inferred
+        return None
+
     for row in rows:
         status = (row.get("Status") or "Unknown").strip() or "Unknown"
+        raw_status_counts[status] = raw_status_counts.get(status, 0) + 1
+        normalized_status = status.lower()
+        moved_to_tm = tm_moved(row.get("T&M Moved"))
+        if normalized_status == "done" and not moved_to_tm:
+            done_dt = infer_done_dt(row)
+            if done_dt and not str(row.get("Done Timestamp") or "").strip():
+                row["Done Timestamp"] = done_dt.strftime("%Y-%m-%d %H:%M:%S")
+                changed = True
+            if done_dt and ((now - done_dt).total_seconds() / 86400.0) >= AUTO_MOVE_DONE_TO_TM_DAYS:
+                row["T&M Moved"] = True
+                if not str(row.get("T&M Moved Timestamp") or "").strip():
+                    row["T&M Moved Timestamp"] = now.strftime("%Y-%m-%d %H:%M:%S")
+                changed = True
+                moved_to_tm = True
+        if normalized_status == "done" and moved_to_tm:
+            continue
+
         status_counts[status] = status_counts.get(status, 0) + 1
         updated_at = row.get("Status Updated At") or row.get("Timestamp") or ""
         dt = parse_dt(updated_at)
@@ -891,12 +2521,21 @@ def summarize_draw_orders() -> dict:
             {
                 "preform": row.get("Preform Number", ""),
                 "project": row.get("Fiber Project", ""),
+                "geometry": row.get("Fiber Geometry Type", "") or row.get("Geometry", ""),
                 "status": status,
                 "priority": row.get("Priority", "Normal"),
                 "length": row.get("Length (m)") or row.get("Required Length (m) (for T&M+costumer)") or "0",
+                "good_zones": row.get("Good Zones Count", "") or row.get("Good Zones Count (required length zones)", "") or "0",
+                "notes": row.get("Notes", ""),
+                "done_description": row.get("Done Description", ""),
+                "failed_description": row.get("Failed Description", ""),
+                "dataset": row.get("Assigned Dataset CSV", "") or row.get("Done CSV", "") or row.get("Failed CSV", ""),
                 "updated_at": updated_at,
             }
         )
+
+    if changed and rows:
+        write_csv_rows(DRAW_ORDERS, rows, fieldnames or list(rows[0].keys()))
 
     def sort_key(item: dict) -> datetime:
         return parse_dt(item.get("updated_at")) or datetime.min
@@ -905,7 +2544,11 @@ def summarize_draw_orders() -> dict:
     total = len(rows)
     done = status_counts.get("Done", 0)
     failed = status_counts.get("Failed", 0)
-    active = total - done - failed
+    active = sum(
+        count
+        for label, count in raw_status_counts.items()
+        if str(label or "").strip().lower() not in {"done", "failed"}
+    )
     in_progress = status_counts.get("In Progress", 0)
     scheduled = status_counts.get("Scheduled", 0)
     pending = status_counts.get("Pending", 0)
@@ -1470,6 +3113,75 @@ def render_manual_page_image(pdf_path: Path, page_number: int) -> Path:
     return _render_manual_page_image_once(pdf_path, safe_page, output_path)
 
 
+def export_manual_page_pdf(pdf_path: Path, page_number: int) -> Path:
+    if not pdf_path.exists():
+        raise FileNotFoundError(f"Manual PDF not found: {pdf_path.name}")
+    if not pdf_path.is_file():
+        raise FileNotFoundError(f"Manual PDF path is not a file: {pdf_path.name}")
+    helper_python = resolve_helper_python(("pypdf",))
+    if helper_python is None:
+        raise RuntimeError("No compatible PDF helper runtime with pypdf was found.")
+    safe_page = max(1, int(page_number or 1))
+    output_dir = MAINTENANCE_MANUAL_PAGES_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{slugify(pdf_path.stem) or 'manual'}_page_{safe_page}.pdf"
+    export_script = (
+        "from pathlib import Path\n"
+        "from pypdf import PdfReader, PdfWriter\n"
+        "import sys\n"
+        "src = Path(sys.argv[1])\n"
+        "page_number = max(1, int(sys.argv[2]))\n"
+        "dest = Path(sys.argv[3])\n"
+        "reader = PdfReader(str(src))\n"
+        "if page_number > len(reader.pages):\n"
+        "    raise SystemExit('Page out of range')\n"
+        "writer = PdfWriter()\n"
+        "writer.add_page(reader.pages[page_number - 1])\n"
+        "dest.parent.mkdir(parents=True, exist_ok=True)\n"
+        "with dest.open('wb') as handle:\n"
+        "    writer.write(handle)\n"
+    )
+    try:
+        subprocess.run(
+            [str(helper_python), "-c", export_script, str(pdf_path), str(safe_page), str(output_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip() or "Unknown PDF export error"
+        raise RuntimeError(f"Manual page PDF export failed: {detail}") from exc
+    if not output_path.exists() or output_path.stat().st_size <= 0:
+        raise FileNotFoundError("Manual page PDF export failed.")
+    return output_path
+
+
+def development_media_placeholder_svg(title: str, detail: str = "") -> bytes:
+    safe_title = escape_html(str(title or "").strip() or "Preview unavailable")
+    safe_detail = escape_html(str(detail or "").strip())
+    body = f"""<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="#0d1b28"/>
+      <stop offset="100%" stop-color="#08131d"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="78%" cy="20%" r="48%">
+      <stop offset="0%" stop-color="#72ffe8" stop-opacity="0.14"/>
+      <stop offset="100%" stop-color="#72ffe8" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1200" height="760" fill="url(#bg)"/>
+  <rect width="1200" height="760" fill="url(#glow)"/>
+  <rect x="48" y="48" width="1104" height="664" rx="24" fill="none" stroke="#1f4f5a" stroke-width="2"/>
+  <rect x="88" y="96" width="180" height="56" rx="28" fill="#163645" stroke="#2a6c76" stroke-width="1.5"/>
+  <text x="178" y="131" text-anchor="middle" font-family="Orbitron, Arial, sans-serif" font-size="24" fill="#dff9fb" letter-spacing="3">PREVIEW</text>
+  <text x="88" y="252" font-family="Orbitron, Arial, sans-serif" font-size="54" fill="#ecf8fa" letter-spacing="2">{safe_title}</text>
+  <text x="88" y="320" font-family="Arial, sans-serif" font-size="28" fill="#9bc8cf">{safe_detail}</text>
+</svg>"""
+    return body.encode("utf-8")
+
+
 def _prefetch_manual_page_image_task(pdf_path: Path, page_number: int, render_signature: str, priority: bool = False) -> None:
     try:
         render_manual_page_image(pdf_path, page_number)
@@ -1506,57 +3218,116 @@ def schedule_manual_page_prefetch(pdf_path: Path, page_numbers: list[int], prior
     return scheduled
 
 
+FAULT_LOG_FIELDS = [
+    "fault_id",
+    "fault_ts",
+    "fault_component",
+    "fault_title",
+    "fault_description",
+    "fault_severity",
+    "fault_actor",
+    "fault_source_file",
+    "fault_related_draw",
+]
+
+FAULT_ACTION_FIELDS = [
+    "fault_action_id",
+    "fault_id",
+    "action_ts",
+    "action_type",
+    "actor",
+    "note",
+    "fix_summary",
+]
+
+
+def parse_fault_timestamp(value: object) -> datetime:
+    raw = str(value or "").strip()
+    if not raw:
+        return datetime.min
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        return datetime.min
+
+
+def maintenance_fault_latest_state_map(fault_action_rows: list[dict[str, str]]) -> dict[str, dict[str, object]]:
+    latest: dict[str, dict[str, object]] = {}
+    sorted_rows = sorted(
+        fault_action_rows or [],
+        key=lambda row: (
+            str(row.get("fault_id", "")).strip(),
+            parse_fault_timestamp(row.get("action_ts", "")),
+            str(row.get("fault_action_id", "")).strip(),
+        ),
+    )
+    for row in sorted_rows:
+        fault_id = str(row.get("fault_id", "")).strip()
+        if not fault_id:
+            continue
+        action_type = str(row.get("action_type", "")).strip().lower()
+        latest[fault_id] = {
+            "is_closed": action_type == "close",
+            "last_ts": str(row.get("action_ts", "")).strip(),
+            "last_note": str(row.get("note", "")).strip(),
+            "last_fix": str(row.get("fix_summary", "")).strip(),
+            "last_type": action_type,
+            "last_actor": str(row.get("actor", "")).strip(),
+        }
+    return latest
+
+
+def build_maintenance_fault_entry(row: dict[str, str], state_map: dict[str, dict[str, object]]) -> dict[str, object] | None:
+    fault_id = str(row.get("fault_id", "")).strip()
+    if not fault_id:
+        return None
+    state = state_map.get(fault_id, {})
+    return {
+        "fault_id": fault_id,
+        "ts": str(row.get("fault_ts", "")).strip(),
+        "component": str(row.get("fault_component", "")).strip() or "Unknown component",
+        "title": str(row.get("fault_title", "")).strip() or "Fault",
+        "description": str(row.get("fault_description", "")).strip(),
+        "severity": str(row.get("fault_severity", "")).strip() or "medium",
+        "actor": str(row.get("fault_actor", "")).strip(),
+        "source_file": str(row.get("fault_source_file", "")).strip(),
+        "related_draw": str(row.get("fault_related_draw", "")).strip(),
+        "is_closed": bool(state.get("is_closed", False)),
+        "last_action_type": str(state.get("last_type", "")).strip(),
+        "last_action_ts": str(state.get("last_ts", "")).strip(),
+        "last_action_actor": str(state.get("last_actor", "")).strip(),
+        "last_note": str(state.get("last_note", "")).strip(),
+        "last_fix": str(state.get("last_fix", "")).strip(),
+    }
+
+
 def summarize_maintenance_rebuild() -> dict:
     runtime_context = get_maintenance_runtime_context()
     tasks = read_maintenance_tracker_rows()
+    test_preset_library = load_maintenance_test_preset_library()
     state_rows = read_csv_rows(MAINTENANCE_STATE)
     action_rows = read_csv_rows(MAINTENANCE_ACTIONS)
     wait_rows = [row for row in read_csv_rows(MAINTENANCE_WAITS) if not str(row.get("resolved_ts", "")).strip()]
     part_orders = read_csv_rows(PART_ORDERS)
     inventory_rows = read_csv_rows(PARTS_INVENTORY)
     schedule = summarize_schedule()
-    work_package_rows = read_csv_rows(MAINTENANCE_DIR / "maintenance_work_packages.csv")
+    work_package_rows = read_csv_rows(MAINTENANCE_WORK_PACKAGES)
     fault_rows = read_csv_rows(FAULTS_LOG)
     fault_action_rows = read_csv_rows(FAULTS_ACTIONS_LOG)
     execute_status_rank = {
         "SCHEDULED": 0,
         "IN_PROGRESS": 1,
-        "PREP_READY": 2,
-        "WAIT FOR PART": 3,
-        "BLOCKED_PARTS": 4,
+        "PREP_DONE": 2,
+        "PREP_READY": 3,
+        "WAIT FOR PART": 4,
+        "BLOCKED_PARTS": 5,
     }
-    due_lookup: dict[str, dict[str, object]] = {}
-    try:
-        helper_df = load_maintenance_folder_df(str(MAINTENANCE_DIR))
-        helper_status_df = compute_maintenance_status_df(
-            helper_df,
-            current_draw_count=int(runtime_context["draw_count"]),
-            furnace_hours=float(runtime_context["furnace_hours"]),
-            uv1_hours=float(runtime_context["uv1_hours"]),
-            uv2_hours=float(runtime_context["uv2_hours"]),
-            warn_days=int(runtime_context["warn_days"]),
-            warn_hours=float(runtime_context["warn_hours"]),
-            current_date=runtime_context["current_date"],
-        )
-        for helper_row in helper_status_df.to_dict(orient="records"):
-            helper_task_id = str(helper_row.get("Task_ID", "")).strip()
-            helper_component = str(helper_row.get("Component", "")).strip().lower()
-            helper_task = str(helper_row.get("Task", "")).strip().lower()
-            helper_key = helper_task_id or f"{helper_component}::{helper_task}"
-            if not helper_key:
-                continue
-            next_due_date = helper_row.get("Next_Due_Date")
-            if hasattr(next_due_date, "isoformat"):
-                next_due_date = next_due_date.isoformat()
-            due_lookup[helper_key] = {
-                "next_due_date": str(next_due_date or "").strip(),
-                "next_due_hours": helper_row.get("Next_Due_Hours"),
-                "next_due_draw": helper_row.get("Next_Due_Draw"),
-                "hours_source": str(helper_row.get("Hours_Source", "")).strip(),
-                "timing_status": str(helper_row.get("Status", "")).strip(),
-            }
-    except Exception:
-        due_lookup = {}
+    due_lookup = build_maintenance_due_lookup(runtime_context)
 
     def maintenance_signature(task_id: str, component: str, task: str) -> str:
         raw_task_id = str(task_id or "").strip()
@@ -1605,10 +3376,33 @@ def summarize_maintenance_rebuild() -> dict:
         }
         for row in action_rows[-10:]
     ][::-1]
+    scheduled_windows_by_task: dict[str, list[dict[str, str]]] = {}
+    task_id_pattern = re.compile(r"Task ID:\s*([A-Za-z0-9-]+)", re.IGNORECASE)
+    for schedule_row in schedule.get("master_rows", []):
+        if "maintenance" not in str(schedule_row.get("event_type", "")).strip().lower():
+            continue
+        description = str(schedule_row.get("description", "")).strip()
+        task_id_match = task_id_pattern.search(description)
+        if not task_id_match:
+            continue
+        scheduled_task_id = task_id_match.group(1).strip()
+        if not scheduled_task_id:
+            continue
+        scheduled_windows_by_task.setdefault(scheduled_task_id, []).append(
+            {
+                "start": str(schedule_row.get("start", "")).strip(),
+                "end": str(schedule_row.get("end", "")).strip(),
+                "label": str(schedule_row.get("start", "")).strip()[:16].replace("T", " "),
+                "recurrence": normalize_recurrence(schedule_row.get("recurrence", "")) or "none",
+            }
+        )
+    for windows in scheduled_windows_by_task.values():
+        windows.sort(key=lambda item: (item.get("start", ""), item.get("end", ""), item.get("label", "")))
 
     task_rows = []
     prep_queue = []
     execute_queue = []
+    execute_plan_queue = []
     blocked_tracker = []
     seen_task_signatures: set[str] = set()
     for row in tasks:
@@ -1619,36 +3413,108 @@ def summarize_maintenance_rebuild() -> dict:
         seen_task_signatures.add(task_signature)
         helper_key = task_id or f"{str(row.get('Component', '')).strip().lower()}::{str(row.get('Task', '')).strip().lower()}"
         due_meta = due_lookup.get(helper_key, {})
-        required_parts = split_required_parts(row.get("Required_Parts", ""))
+        required_parts_text = first_task_value(row, "Mandatory_Parts", "Required_Parts")
+        required_tools_text = first_task_value(row, "Required_Tools")
+        conditional_parts_text = first_task_value(row, "Conditional_Parts")
+        required_parts = split_required_parts(required_parts_text)
+        required_tools = split_required_parts(required_tools_text)
+        mandatory_parts = split_required_parts(first_task_value(row, "Mandatory_Parts"))
+        conditional_parts = split_required_parts(conditional_parts_text)
         missing_parts = [part for part in required_parts if part.lower() not in stock_names]
+        work_package_row = work_package_by_task.get(task_id) or work_package_by_signature.get(task_signature) or {}
         linked_orders = linked_orders_by_task.get(task_id, [])
-        open_linked = [item for item in linked_orders if str(item.get("Status", "")).strip() in {"Opened", "Wait for Approval", "Approved", "Ordered", "Received"}]
+        open_linked = [
+            item for item in linked_orders
+            if str(item.get("Status", "")).strip() in {"Opened", "Wait for Approval", "Approved", "Ordered"}
+        ]
         received_waiting_sync = [
-            item for item in open_linked
+            item for item in linked_orders
             if str(item.get("Status", "")).strip() == "Received"
             and str(item.get("Inventory Synced", "")).strip().lower() != "yes"
         ]
+        linked_ready = [
+            item for item in linked_orders
+            if str(item.get("Status", "")).strip() in {"Received", "Archived"}
+            and str(item.get("Inventory Synced", "")).strip().lower() == "yes"
+        ]
+        ordered_part_names = {
+            str(item.get("Part Name", "")).strip().lower()
+            for item in linked_orders
+            if str(item.get("Status", "")).strip() in {"Opened", "Wait for Approval", "Approved", "Ordered", "Received"}
+        }
+        missing_parts_unordered = [part for part in missing_parts if part.lower() not in ordered_part_names]
+        missing_parts_ordered = [part for part in missing_parts if part.lower() in ordered_part_names]
+        parts_blocker_cleared = not missing_parts and not open_linked and not received_waiting_sync
         current_state = str((state_by_task.get(task_id) or state_by_signature.get(task_signature) or {}).get("state", "")).strip() or ""
+        if current_state == "BLOCKED_PARTS":
+            current_state = "PREP_READY"
         flow_state = "Ready for preparation"
         if received_waiting_sync:
-            flow_state = "Received, waiting inventory action"
+            flow_state = "Received, sync into inventory"
         elif open_linked:
-            flow_state = "Wait for order"
+            flow_state = "Parts ordered, waiting for arrival"
         elif missing_parts:
             flow_state = "Missing parts, no linked order yet"
-        if task_id in wait_by_task or task_signature in wait_by_signature:
-            current_state = current_state or "WAIT FOR PART"
+        if current_state not in {"PREP_DONE", "SCHEDULED", "IN_PROGRESS", "DONE_NOW"}:
+            if (
+                task_id in wait_by_task
+                or task_signature in wait_by_signature
+                or received_waiting_sync
+                or open_linked
+            ):
+                current_state = "WAIT FOR PART"
+        if current_state not in {"SCHEDULED", "IN_PROGRESS", "DONE_NOW"} and parts_blocker_cleared:
+            if linked_ready:
+                current_state = "PREP_DONE"
+                flow_state = "Ready to execute after inventory sync"
+            elif current_state == "WAIT FOR PART":
+                current_state = "PREP_READY"
+                flow_state = "Parts ready, finish prep"
+            elif current_state in {"PREP_READY", ""}:
+                current_state = "PREP_DONE"
+                flow_state = "Ready to execute"
         if not current_state:
-            current_state = "PREP_READY" if flow_state == "Ready for preparation" else "BLOCKED_PARTS"
+            current_state = "PREP_READY"
+        if current_state == "PREP_DONE" and flow_state != "Ready to execute after inventory sync":
+            flow_state = "Ready to execute by prep override"
+        scheduled_windows = scheduled_windows_by_task.get(task_id, [])
+        plan_forwarded = bool(scheduled_windows) or current_state in {"SCHEDULED", "PREP_DONE"}
         item = {
             "task_id": task_id,
             "component": row.get("Component", ""),
             "task": row.get("Task", ""),
             "task_group": row.get("Task_Group", ""),
+            "task_groups": first_task_value(row, "Task_Groups", "Task_Group"),
+            "owner": first_task_value(row, "Owner"),
             "tracking_mode": row.get("Tracking_Mode", ""),
             "hours_source": row.get("Hours_Source", "") or due_meta.get("hours_source", ""),
+            "interval_type": first_task_value(row, "Interval Type"),
+            "interval_value": first_task_value(row, "Interval Value"),
+            "interval_unit": first_task_value(row, "Interval Unit"),
+            "planning_window_months": first_task_value(row, "Planning_Window_Months"),
+            "due_threshold_days": first_task_value(row, "Due Threshold (days)"),
+            "trigger_context": first_task_value(row, "Trigger Context"),
+            "trigger_modes": first_task_value(row, "Trigger_Modes"),
+            "trigger_hours_source": first_task_value(row, "Trigger_Hours_Source"),
+            "trigger_hours_interval": first_task_value(row, "Trigger_Hours_Interval"),
+            "trigger_draws_interval": first_task_value(row, "Trigger_Draws_Interval"),
+            "trigger_calendar_value": first_task_value(row, "Trigger_Calendar_Value"),
+            "trigger_calendar_unit": first_task_value(row, "Trigger_Calendar_Unit"),
+            "calendar_rule": first_task_value(row, "Calendar Rule"),
             "required_parts": required_parts,
+            "required_parts_text": required_parts_text,
+            "required_tools": required_tools,
+            "required_tools_text": required_tools_text,
+            "mandatory_parts": mandatory_parts,
+            "mandatory_parts_text": first_task_value(row, "Mandatory_Parts", "Required_Parts"),
+            "conditional_parts": conditional_parts,
+            "conditional_parts_text": conditional_parts_text,
+            "preparation_lead_days": first_task_value(row, "Preparation_Lead_Days"),
+            "parts_check_lead_days": first_task_value(row, "Parts_Check_Lead_Days"),
+            "auto_order_mandatory_parts": first_task_value(row, "Auto_Order_Mandatory_Parts"),
             "missing_parts": missing_parts,
+            "missing_parts_unordered": missing_parts_unordered,
+            "missing_parts_ordered": missing_parts_ordered,
             "status": current_state,
             "timing_status": str(due_meta.get("timing_status", "")),
             "flow_state": flow_state,
@@ -1665,6 +3531,13 @@ def summarize_maintenance_rebuild() -> dict:
             "manual_name": row.get("Manual_Name", ""),
             "manual_link": row.get("Document", ""),
             "manual_page": row.get("Page", ""),
+            "procedure_summary_text": first_task_value(row, "Procedure Summary"),
+            "safety_notes_text": first_task_value(row, "Safety/Notes"),
+            "test_preset": first_task_value(row, "Test_Preset"),
+            "test_fields": first_task_value(row, "Test_Fields"),
+            "test_thresholds": first_task_value(row, "Test_Thresholds"),
+            "test_condition": first_task_value(row, "Test_Condition"),
+            "test_action": first_task_value(row, "Test_Action"),
             "wait_note": str(
                 (
                     wait_by_task.get(task_id)
@@ -1679,23 +3552,23 @@ def summarize_maintenance_rebuild() -> dict:
             ).strip(),
             "linked_open_count": len(open_linked),
             "linked_received_waiting_sync": len(received_waiting_sync),
-            "linked_ready_count": len([item for item in linked_orders if str(item.get("Status", "")).strip() == "Received" and str(item.get("Inventory Synced", "")).strip().lower() == "yes"]),
+            "linked_ready_count": len(linked_ready),
             "work_package": {
-                "preparation_checklist": str((work_package_by_task.get(task_id) or work_package_by_signature.get(task_signature) or {}).get("Preparation_Checklist", "")).strip(),
-                "safety_protocol": str((work_package_by_task.get(task_id) or work_package_by_signature.get(task_signature) or {}).get("Safety_Protocol", "")).strip(),
-                "safety_fall_risk": str((work_package_by_task.get(task_id) or work_package_by_signature.get(task_signature) or {}).get("Safety_Fall_Risk", "")).strip(),
-                "safety_tnm_presence": str((work_package_by_task.get(task_id) or work_package_by_signature.get(task_signature) or {}).get("Safety_TnM_Presence", "")).strip(),
-                "procedure_steps": str((work_package_by_task.get(task_id) or work_package_by_signature.get(task_signature) or {}).get("Procedure_Steps", "")).strip(),
-                "procedure_photos": str((work_package_by_task.get(task_id) or work_package_by_signature.get(task_signature) or {}).get("Procedure_Photos", "")).strip(),
-                "sanity_checklist": str((work_package_by_task.get(task_id) or work_package_by_signature.get(task_signature) or {}).get("Sanity_Checklist", "")).strip(),
-                "sanity_results": str((work_package_by_task.get(task_id) or work_package_by_signature.get(task_signature) or {}).get("Sanity_Results", "")).strip(),
-                "supplier_name": str((work_package_by_task.get(task_id) or work_package_by_signature.get(task_signature) or {}).get("Supplier_Name", "")).strip(),
-                "supplier_details": str((work_package_by_task.get(task_id) or work_package_by_signature.get(task_signature) or {}).get("Supplier_Details", "")).strip(),
-                "draw_stop_plan": str((work_package_by_task.get(task_id) or work_package_by_signature.get(task_signature) or {}).get("Draw_Stop_Plan", "")).strip(),
-                "est_stop_min": str((work_package_by_task.get(task_id) or work_package_by_signature.get(task_signature) or {}).get("Est_Stop_Min", "")).strip(),
-                "completion_criteria": str((work_package_by_task.get(task_id) or work_package_by_signature.get(task_signature) or {}).get("Completion_Criteria", "")).strip(),
-                "last_updated": str((work_package_by_task.get(task_id) or work_package_by_signature.get(task_signature) or {}).get("Last_Updated", "")).strip(),
-                "updated_by": str((work_package_by_task.get(task_id) or work_package_by_signature.get(task_signature) or {}).get("Updated_By", "")).strip(),
+                "preparation_checklist": str(work_package_row.get("Preparation_Checklist", "")).strip(),
+                "safety_protocol": str(work_package_row.get("Safety_Protocol", "")).strip(),
+                "safety_fall_risk": str(work_package_row.get("Safety_Fall_Risk", "")).strip(),
+                "safety_tnm_presence": str(work_package_row.get("Safety_TnM_Presence", "")).strip(),
+                "procedure_steps": str(work_package_row.get("Procedure_Steps", "")).strip(),
+                "procedure_photos": str(work_package_row.get("Procedure_Photos", "")).strip(),
+                "sanity_checklist": str(work_package_row.get("Sanity_Checklist", "")).strip(),
+                "sanity_results": str(work_package_row.get("Sanity_Results", "")).strip(),
+                "supplier_name": str(work_package_row.get("Supplier_Name", "")).strip(),
+                "supplier_details": str(work_package_row.get("Supplier_Details", "")).strip(),
+                "draw_stop_plan": str(work_package_row.get("Draw_Stop_Plan", "")).strip(),
+                "est_stop_min": str(work_package_row.get("Est_Stop_Min", "")).strip(),
+                "completion_criteria": str(work_package_row.get("Completion_Criteria", "")).strip(),
+                "last_updated": str(work_package_row.get("Last_Updated", "")).strip(),
+                "updated_by": str(work_package_row.get("Updated_By", "")).strip(),
             },
             "linked_orders": [
                 {
@@ -1705,18 +3578,30 @@ def summarize_maintenance_rebuild() -> dict:
                 }
                 for order in linked_orders[:6]
             ],
+            "scheduled_windows": scheduled_windows[:3],
+            "scheduled_window_labels": [window.get("label", "") for window in scheduled_windows[:3] if window.get("label")],
+            "scheduled_window_count": len(scheduled_windows),
+            "plan_forwarded": plan_forwarded,
+            "prep_done_override": current_state == "PREP_DONE",
         }
         task_rows.append(item)
-        if current_state in {"PREP_READY", "BLOCKED_PARTS", "WAIT FOR PART"}:
+        if current_state in {"PREP_READY", "PREP_DONE", "WAIT FOR PART"}:
             prep_queue.append(item)
-        if current_state in {"PREP_READY", "IN_PROGRESS", "BLOCKED_PARTS", "WAIT FOR PART", "SCHEDULED"}:
+        # Execute should show only tasks that were actually handed forward
+        # from plan, are live now, or are blocked after being handed off.
+        if current_state in {"SCHEDULED", "IN_PROGRESS"}:
             execute_queue.append(item)
-        if flow_state != "Ready for preparation" or current_state in {"BLOCKED_PARTS", "WAIT FOR PART"}:
+        elif current_state == "WAIT FOR PART" and plan_forwarded:
+            execute_queue.append(item)
+        if current_state in {"SCHEDULED", "IN_PROGRESS"} and (plan_forwarded or current_state == "SCHEDULED"):
+            execute_plan_queue.append(item)
+        if current_state != "PREP_DONE" and (flow_state != "Ready for preparation" or current_state == "WAIT FOR PART"):
             blocked_tracker.append(item)
 
     task_rows.sort(key=lambda item: (item["status"], item["component"], item["task"]))
     prep_queue.sort(key=lambda item: (item["status"], item["component"], item["task"]))
     execute_queue.sort(key=lambda item: (execute_status_rank.get(str(item["status"]).upper(), 99), item["component"], item["task"]))
+    execute_plan_queue.sort(key=lambda item: (execute_status_rank.get(str(item["status"]).upper(), 99), item["component"], item["task"]))
     blocked_tracker.sort(key=lambda item: (item["status"], item["component"], item["task"]))
     maintenance_events = [
         item for item in schedule.get("upcoming", [])
@@ -1727,69 +3612,154 @@ def summarize_maintenance_rebuild() -> dict:
         if any(token in str(item.get("event_type", "")).lower() for token in ["maintenance preparation", "maintenance parts check"])
     ]
     smart_todo = (blocked_tracker[:4] + [item for item in prep_queue if item["task_id"] not in {row["task_id"] for row in blocked_tracker[:4]}][:4])[:8]
-    faults_recent = [
-        {
-            "fault_id": str(row.get("fault_id", "")).strip(),
-            "ts": str(row.get("fault_ts", "")).strip(),
-            "component": str(row.get("fault_component", "")).strip(),
-            "title": str(row.get("fault_title", "")).strip(),
-            "severity": str(row.get("fault_severity", "")).strip() or "medium",
-            "related_draw": str(row.get("fault_related_draw", "")).strip(),
-        }
-        for row in fault_rows[-16:]
-    ][::-1]
-    fault_actions_by_id: dict[str, list[dict[str, str]]] = {}
-    for row in fault_action_rows:
-        fault_id = str(row.get("fault_id", "")).strip()
-        if not fault_id:
-            continue
-        fault_actions_by_id.setdefault(fault_id, []).append(row)
+    fault_state_map = maintenance_fault_latest_state_map(fault_action_rows)
+    fault_entries = [
+        item
+        for item in (build_maintenance_fault_entry(row, fault_state_map) for row in fault_rows)
+        if item
+    ]
+    fault_entries.sort(
+        key=lambda item: (
+            parse_fault_timestamp(item.get("ts", "")),
+            str(item.get("fault_id", "")).strip(),
+        ),
+        reverse=True,
+    )
+    faults_open = [item for item in fault_entries if not item["is_closed"]]
+    faults_closed = [item for item in fault_entries if item["is_closed"]]
+    faults_recent = fault_entries[:16]
     component_fault_counts: dict[str, int] = {}
-    for row in fault_rows:
-        component = str(row.get("fault_component", "")).strip() or "Unknown"
+    for row in faults_open:
+        component = str(row.get("component", "")).strip() or "Unknown"
         component_fault_counts[component] = component_fault_counts.get(component, 0) + 1
-    fault_hotspots = [
-        {"component": component, "count": count}
-        for component, count in sorted(component_fault_counts.items(), key=lambda item: (-item[1], item[0]))
-    ][:8]
-    correlation_watch = []
-    task_components = {str(item.get("component", "")).strip().lower(): item for item in task_rows}
-    for fault in faults_recent:
-        component_key = str(fault.get("component", "")).strip().lower()
-        related_task = task_components.get(component_key)
-        correlation_watch.append(
-            {
-                "fault_title": fault["title"],
-                "fault_component": fault["component"],
-                "fault_severity": fault["severity"],
-                "linked_task": related_task["task"] if related_task else "",
-                "linked_status": related_task["status"] if related_task else "",
-            }
-        )
     runtime = get_maintenance_runtime()
 
     return {
         "metrics": [
             {"label": "Tasks", "value": len(task_rows)},
             {"label": "Prep Queue", "value": len(prep_queue)},
-            {"label": "Blocked", "value": len([item for item in task_rows if item["status"] in {"BLOCKED_PARTS", "WAIT FOR PART"}])},
+            {"label": "Wait For Part", "value": len([item for item in task_rows if item["status"] == "WAIT FOR PART"])},
             {"label": "Recent Actions", "value": len(action_rows)},
         ],
         "tasks": task_rows,
-        "prep_queue": prep_queue[:24],
-        "execute_queue": execute_queue[:24],
-        "blocked_tracker": blocked_tracker[:24],
+        "prep_queue": prep_queue,
+        "execute_queue": execute_queue,
+        "execute_plan_queue": execute_plan_queue,
+        "blocked_tracker": blocked_tracker,
         "recent_actions": recent_actions,
         "completed_ids": completed_ids[-12:],
         "maintenance_events": maintenance_events[:8],
         "prep_events": prep_events[:8],
         "smart_todo": smart_todo,
+        "faults_open": faults_open[:24],
+        "faults_closed": faults_closed[:24],
+        "fault_open_total": len(faults_open),
+        "fault_open_critical_total": len(
+            [item for item in faults_open if str(item.get("severity", "")).strip().lower() == "critical"]
+        ),
         "faults_recent": faults_recent,
-        "fault_hotspots": fault_hotspots,
         "fault_actions_total": len(fault_action_rows),
-        "correlation_watch": correlation_watch[:10],
         "timeline_runtime": runtime,
+        "test_preset_options": sorted(test_preset_library.keys()),
+        "tool_options": dedupe_strings(
+            [
+                str(row.get("Part Name", "")).strip()
+                for row in inventory_rows
+                if str(row.get("Part Name", "")).strip()
+                and (
+                    str(row.get("Item Type", "")).strip().lower() == "tool"
+                    or is_tool_like_part_name(str(row.get("Part Name", "")).strip())
+                )
+            ]
+            + [tool for item in task_rows for tool in item.get("required_tools", [])]
+        ),
     }
+
+
+def save_maintenance_fault_action(payload: dict) -> JsonResponse:
+    action = str(payload.get("action", "")).strip().lower()
+    actor = str(payload.get("actor", "")).strip() or "rebuild"
+    now_label = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    fault_rows = read_csv_rows(FAULTS_LOG)
+    fault_fieldnames = read_csv_fieldnames(FAULTS_LOG) or list(FAULT_LOG_FIELDS)
+    fault_action_rows = read_csv_rows(FAULTS_ACTIONS_LOG)
+    fault_action_fieldnames = read_csv_fieldnames(FAULTS_ACTIONS_LOG) or list(FAULT_ACTION_FIELDS)
+    fault_id = str(payload.get("faultId", "")).strip()
+
+    if action == "create":
+        component = str(payload.get("component", "")).strip()
+        title = str(payload.get("title", "")).strip()
+        description = str(payload.get("description", "")).strip()
+        if not component:
+            return JsonResponse({"ok": False, "message": "Fault component is required."}, 400)
+        if not title and not description:
+            return JsonResponse({"ok": False, "message": "Add at least a fault title or description."}, 400)
+        fault_rows.append(
+            {
+                "fault_id": str(int(datetime.now().timestamp() * 1000)),
+                "fault_ts": now_label,
+                "fault_component": component,
+                "fault_title": title or "Fault",
+                "fault_description": description,
+                "fault_severity": str(payload.get("severity", "")).strip() or "medium",
+                "fault_actor": actor,
+                "fault_source_file": str(payload.get("sourceFile", "")).strip(),
+                "fault_related_draw": str(payload.get("relatedDraw", "")).strip(),
+            }
+        )
+        write_csv_rows(FAULTS_LOG, fault_rows, fault_fieldnames)
+        return JsonResponse({"ok": True, "message": "Fault logged.", "bootstrap": build_bootstrap_payload().body})
+
+    match_index = next((index for index, row in enumerate(fault_rows) if str(row.get("fault_id", "")).strip() == fault_id), None)
+    if match_index is None:
+        return JsonResponse({"ok": False, "message": "Fault not found."}, 404)
+
+    if action == "edit":
+        component = str(payload.get("component", "")).strip()
+        title = str(payload.get("title", "")).strip()
+        description = str(payload.get("description", "")).strip()
+        if not component:
+            return JsonResponse({"ok": False, "message": "Fault component is required."}, 400)
+        if not title and not description:
+            return JsonResponse({"ok": False, "message": "Add at least a fault title or description."}, 400)
+        row = dict(fault_rows[match_index])
+        row["fault_component"] = component
+        row["fault_title"] = title or "Fault"
+        row["fault_description"] = description
+        row["fault_severity"] = str(payload.get("severity", "")).strip() or row.get("fault_severity", "") or "medium"
+        row["fault_source_file"] = str(payload.get("sourceFile", "")).strip()
+        row["fault_related_draw"] = str(payload.get("relatedDraw", "")).strip()
+        fault_rows[match_index] = row
+        write_csv_rows(FAULTS_LOG, fault_rows, fault_fieldnames)
+        return JsonResponse({"ok": True, "message": "Fault updated.", "bootstrap": build_bootstrap_payload().body})
+
+    if action in {"close", "note", "reopen"}:
+        note = str(payload.get("note", "")).strip()
+        fix_summary = str(payload.get("fixSummary", "")).strip()
+        if action == "close" and not note and not fix_summary:
+            return JsonResponse({"ok": False, "message": "Add a close note or fix summary."}, 400)
+        if action in {"note", "reopen"} and not note:
+            return JsonResponse({"ok": False, "message": "Add a note first."}, 400)
+        fault_action_rows.append(
+            {
+                "fault_action_id": str(int(datetime.now().timestamp() * 1000)),
+                "fault_id": fault_id,
+                "action_ts": now_label,
+                "action_type": action,
+                "actor": actor,
+                "note": note,
+                "fix_summary": fix_summary,
+            }
+        )
+        write_csv_rows(FAULTS_ACTIONS_LOG, fault_action_rows, fault_action_fieldnames)
+        message = {
+            "close": "Fault closed.",
+            "note": "Fault note saved.",
+            "reopen": "Fault reopened.",
+        }[action]
+        return JsonResponse({"ok": True, "message": message, "bootstrap": build_bootstrap_payload().body})
+
+    return JsonResponse({"ok": False, "message": "Unknown fault action."}, 400)
 
 
 def save_maintenance_runtime_action(payload: dict) -> JsonResponse:
@@ -1800,13 +3770,11 @@ def save_maintenance_runtime_action(payload: dict) -> JsonResponse:
         "furnaceHours": "furnace_hours",
         "uv1Hours": "uv1_hours",
         "uv2Hours": "uv2_hours",
-        "drawCount": "last_draw_count",
     }
     runtime_key_map = {
         "furnaceHours": "furnace_hours",
         "uv1Hours": "uv1_hours",
         "uv2Hours": "uv2_hours",
-        "drawCount": "draw_count",
     }
     for payload_key, state_key in field_map.items():
         raw = payload.get(payload_key, current[runtime_key_map[payload_key]])
@@ -1815,6 +3783,7 @@ def save_maintenance_runtime_action(payload: dict) -> JsonResponse:
         except (TypeError, ValueError):
             return JsonResponse({"ok": False, "message": f"Invalid value for {payload_key}."}, 400)
         updated[state_key] = int(round(value)) if state_key == "last_draw_count" else value
+    updated["last_draw_count"] = int(round(float(len(list_dataset_csv_files()))))
     updated["current_date"] = datetime.now().strftime("%Y-%m-%d")
     write_json_value(MAINTENANCE_RUNTIME, updated)
     return JsonResponse({"ok": True, "message": "Maintenance runtime updated.", "bootstrap": build_bootstrap_payload().body})
@@ -1824,16 +3793,17 @@ def save_maintenance_work_package_action(payload: dict) -> JsonResponse:
     task_id = str(payload.get("taskId", "")).strip()
     component = str(payload.get("component", "")).strip()
     task = str(payload.get("task", "")).strip()
+    source_file = str(payload.get("sourceFile", "")).strip()
     if not task_id or not component or not task:
         return JsonResponse({"ok": False, "message": "Task id, component, and task are required."}, 400)
-    path = MAINTENANCE_DIR / "maintenance_work_packages.csv"
+    path = MAINTENANCE_WORK_PACKAGES
     rows = read_csv_rows(path)
     fieldnames = read_csv_fieldnames(path) or [
-        "Task_ID", "Component", "Task", "Task_Group", "Required_Parts", "Preparation_Checklist", "Safety_Protocol",
+        "Task_ID", "Component", "Task", "Task_Group", "Required_Parts", "Required_Tools", "Preparation_Checklist", "Safety_Protocol",
         "Safety_Fall_Risk", "Safety_TnM_Presence", "Procedure_Steps", "Procedure_Photos", "Sanity_Checklist", "Draw_Stop_Plan",
         "Est_Stop_Min", "Completion_Criteria", "Supplier_Name", "Supplier_Details", "Sanity_Results", "Last_Updated", "Updated_By",
     ]
-    for extra_field in ["Supplier_Name", "Supplier_Details", "Sanity_Checklist", "Sanity_Results"]:
+    for extra_field in ["Required_Tools", "Supplier_Name", "Supplier_Details", "Sanity_Checklist", "Sanity_Results"]:
         if extra_field not in fieldnames:
             fieldnames.append(extra_field)
     index = next((i for i, row in enumerate(rows) if str(row.get("Task_ID", "")).strip() == task_id), None)
@@ -1861,7 +3831,7 @@ def save_maintenance_work_package_action(payload: dict) -> JsonResponse:
             while candidate.exists():
                 candidate = photo_dir / f"{stem}__{version}{suffix}"
                 version += 1
-            candidate.write_bytes(raw)
+            atomic_write_bytes(candidate, raw)
             saved_path = "/" + str(candidate.relative_to(STATIC_DIR)).replace(os.sep, "/")
             if temp_id:
                 uploaded_paths[temp_id] = saved_path
@@ -1894,6 +3864,7 @@ def save_maintenance_work_package_action(payload: dict) -> JsonResponse:
     base_row["Task"] = task
     base_row["Task_Group"] = str(payload.get("taskGroup", base_row.get("Task_Group", ""))).strip()
     base_row["Required_Parts"] = str(payload.get("requiredParts", base_row.get("Required_Parts", ""))).strip()
+    base_row["Required_Tools"] = str(payload.get("requiredTools", base_row.get("Required_Tools", ""))).strip()
     base_row["Preparation_Checklist"] = str(payload.get("preparationChecklist", "")).strip()
     base_row["Safety_Protocol"] = str(payload.get("safetyProtocol", "")).strip()
     base_row["Safety_Fall_Risk"] = str(payload.get("safetyFallRisk", "")).strip()
@@ -1909,12 +3880,164 @@ def save_maintenance_work_package_action(payload: dict) -> JsonResponse:
     base_row["Supplier_Details"] = str(payload.get("supplierDetails", "")).strip()
     base_row["Last_Updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     base_row["Updated_By"] = "rebuild"
+    source_updates = {
+        "Task": task,
+        "Task_Group": str(payload.get("taskGroup", "")).strip(),
+        "Task_Groups": str(payload.get("taskGroups", "")).strip() or str(payload.get("taskGroup", "")).strip(),
+        "Owner": str(payload.get("owner", "")).strip(),
+        "Trigger Context": str(payload.get("triggerContext", "")).strip(),
+        "Tracking_Mode": str(payload.get("trackingMode", "")).strip(),
+        "Hours Source": str(payload.get("hoursSource", "")).strip(),
+        "Interval Type": str(payload.get("intervalType", "")).strip(),
+        "Interval Value": str(payload.get("intervalValue", "")).strip(),
+        "Interval Unit": str(payload.get("intervalUnit", "")).strip(),
+        "Planning_Window_Months": str(payload.get("planningWindowMonths", "")).strip(),
+        "Due Threshold (days)": str(payload.get("dueThresholdDays", "")).strip(),
+        "Required_Parts": str(payload.get("requiredParts", "")).strip(),
+        "Required_Tools": str(payload.get("requiredTools", "")).strip(),
+        "Mandatory_Parts": str(payload.get("requiredParts", "")).strip(),
+        "Conditional_Parts": str(payload.get("conditionalParts", "")).strip(),
+        "Preparation_Lead_Days": str(payload.get("preparationLeadDays", "")).strip(),
+        "Parts_Check_Lead_Days": str(payload.get("partsCheckLeadDays", "")).strip(),
+        "Auto_Order_Mandatory_Parts": str(payload.get("autoOrderMandatoryParts", "")).strip(),
+        "Trigger_Modes": str(payload.get("triggerModes", "")).strip(),
+        "Trigger_Hours_Source": str(payload.get("triggerHoursSource", "")).strip(),
+        "Trigger_Hours_Interval": str(payload.get("triggerHoursInterval", "")).strip(),
+        "Trigger_Draws_Interval": str(payload.get("triggerDrawsInterval", "")).strip(),
+        "Trigger_Calendar_Value": str(payload.get("triggerCalendarValue", "")).strip(),
+        "Trigger_Calendar_Unit": str(payload.get("triggerCalendarUnit", "")).strip(),
+        "Calendar Rule": str(payload.get("calendarRule", "")).strip(),
+        "Manual_Name": str(payload.get("manualName", "")).strip(),
+        "Page": str(payload.get("manualPage", "")).strip(),
+        "Document": str(payload.get("manualLink", "")).strip(),
+        "Procedure Summary": str(payload.get("procedureSummary", "")).strip(),
+        "Safety/Notes": str(payload.get("safetyNotes", "")).strip(),
+        "Test_Preset": str(payload.get("testPreset", "")).strip(),
+        "Test_Fields": str(payload.get("testFields", "")).strip(),
+        "Test_Thresholds": str(payload.get("testThresholds", "")).strip(),
+        "Test_Condition": str(payload.get("testCondition", "")).strip(),
+        "Test_Action": str(payload.get("testAction", "")).strip(),
+    }
+    if source_file:
+        try:
+            update_maintenance_source_task(source_file, task_id, component, task, source_updates)
+        except Exception as exc:
+            return JsonResponse({"ok": False, "message": f"Failed to update maintenance source row: {exc}"}, 400)
     if index is None:
         rows.append(base_row)
     else:
         rows[index] = base_row
     write_csv_rows(path, rows, fieldnames)
     return JsonResponse({"ok": True, "message": "Maintenance work package saved.", "bootstrap": build_bootstrap_payload().body})
+
+
+def create_maintenance_task_action(payload: dict) -> JsonResponse:
+    source_file = str(payload.get("sourceFile", "")).strip()
+    component = str(payload.get("component", "")).strip() or "General"
+    task = str(payload.get("task", "")).strip()
+    task_group = str(payload.get("taskGroup", "")).strip() or "General"
+    try:
+        created = create_maintenance_source_task(source_file, component, task, task_group)
+    except Exception as exc:
+        return JsonResponse({"ok": False, "message": f"Failed to create maintenance task: {exc}"}, 400)
+    return JsonResponse(
+        {
+            "ok": True,
+            "message": "Maintenance task created.",
+            "taskId": created["task_id"],
+            "component": created["component"],
+            "task": created["task"],
+            "bootstrap": build_bootstrap_payload().body,
+        }
+    )
+
+
+def maintenance_row_matches_identity(
+    row: dict[str, object],
+    task_id: str,
+    component: str,
+    task: str,
+    task_id_keys: tuple[str, ...],
+    component_keys: tuple[str, ...],
+    task_keys: tuple[str, ...],
+) -> bool:
+    safe_task_id = str(task_id or "").strip()
+    if safe_task_id and any(str(row.get(key, "")).strip() == safe_task_id for key in task_id_keys):
+        return True
+    safe_component = str(component or "").strip().lower()
+    safe_task = str(task or "").strip().lower()
+    if not safe_component or not safe_task:
+        return False
+    row_component = next((str(row.get(key, "")).strip().lower() for key in component_keys if str(row.get(key, "")).strip()), "")
+    row_task = next((str(row.get(key, "")).strip().lower() for key in task_keys if str(row.get(key, "")).strip()), "")
+    return bool(row_component and row_task and row_component == safe_component and row_task == safe_task)
+
+
+def delete_csv_rows_for_maintenance_task(
+    path: Path,
+    task_id: str,
+    component: str,
+    task: str,
+    task_id_keys: tuple[str, ...],
+    component_keys: tuple[str, ...],
+    task_keys: tuple[str, ...],
+) -> int:
+    if not path.exists():
+        return 0
+    rows = read_csv_rows(path)
+    fieldnames = read_csv_fieldnames(path)
+    kept_rows = [
+        row
+        for row in rows
+        if not maintenance_row_matches_identity(row, task_id, component, task, task_id_keys, component_keys, task_keys)
+    ]
+    removed = len(rows) - len(kept_rows)
+    if removed:
+        write_csv_rows(path, kept_rows, fieldnames or list((rows[0] if rows else {}).keys()))
+    return removed
+
+
+def delete_maintenance_task_action(payload: dict) -> JsonResponse:
+    task_id = str(payload.get("taskId", "")).strip()
+    component = str(payload.get("component", "")).strip()
+    task = str(payload.get("task", "")).strip()
+    source_file = str(payload.get("sourceFile", "")).strip()
+    if not component or not task:
+        return JsonResponse({"ok": False, "message": "Component and task are required."}, 400)
+    if not source_file:
+        return JsonResponse({"ok": False, "message": "Task source file is required for delete."}, 400)
+    try:
+        delete_maintenance_source_task(source_file, task_id, component, task)
+    except Exception as exc:
+        return JsonResponse({"ok": False, "message": f"Failed to delete maintenance task: {exc}"}, 400)
+    delete_csv_rows_for_maintenance_task(
+        MAINTENANCE_WORK_PACKAGES,
+        task_id,
+        component,
+        task,
+        ("Task_ID",),
+        ("Component",),
+        ("Task",),
+    )
+    delete_csv_rows_for_maintenance_task(
+        MAINTENANCE_STATE,
+        task_id,
+        component,
+        task,
+        ("task_id",),
+        ("component",),
+        ("task",),
+    )
+    delete_csv_rows_for_maintenance_task(
+        MAINTENANCE_WAITS,
+        task_id,
+        component,
+        task,
+        ("maintenance_task_id",),
+        ("maintenance_component",),
+        ("maintenance_task",),
+    )
+    return JsonResponse({"ok": True, "message": "Maintenance task deleted.", "bootstrap": build_bootstrap_payload().body})
 
 
 def update_inventory_stock_action(payload: dict) -> JsonResponse:
@@ -2047,7 +4170,7 @@ def update_inventory_stock_action(payload: dict) -> JsonResponse:
     return JsonResponse({"ok": True, "message": "Inventory stock decreased.", "bootstrap": build_bootstrap_payload().body})
 
 
-def sync_part_order_into_inventory(row: dict[str, str], payload: dict) -> None:
+def sync_part_order_into_inventory(row: dict[str, str], payload: dict) -> bool:
     rows = read_csv_rows(PARTS_INVENTORY)
     fieldnames = read_csv_fieldnames(PARTS_INVENTORY)
     if not fieldnames:
@@ -2067,19 +4190,42 @@ def sync_part_order_into_inventory(row: dict[str, str], payload: dict) -> None:
         location = str(payload.get("inventoryLocation", "")).strip() or "Mounted"
     else:
         location = ""
-    if not location:
-        return
     part_name = str(payload.get("partName", row.get("Part Name", ""))).strip()
     serial = str(payload.get("serialNumber", row.get("Serial Number", ""))).strip()
     quantity = max(0.01, to_float(str(payload.get("inventoryQuantity", "1"))))
     item_type = str(payload.get("inventoryItemType", "")).strip() or "Part"
-    component = str(payload.get("maintenanceComponent", row.get("Maintenance Component", ""))).strip() or "Tower Parts"
+    component = str(
+        payload.get("inventoryComponent", "")
+        or payload.get("maintenanceComponent", row.get("Maintenance Component", ""))
+    ).strip() or "Tower Parts"
     supplier = str(payload.get("inventorySupplier", row.get("Company", ""))).strip()
     min_level = str(payload.get("inventoryMinLevel", "")).strip() or "0"
     notes = str(payload.get("inventoryNotes", "")).strip() or f"Auto from received order ({inventory_action})"
     now_label = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     match_index = None
+    preferred_index = to_int(payload.get("inventoryMatchIndex"), -1)
+    if 0 <= preferred_index < len(rows):
+        preferred_row = rows[preferred_index]
+        preferred_part = str(preferred_row.get("Part Name", "")).strip().lower()
+        preferred_serial = str(preferred_row.get("Serial Number", "")).strip().lower()
+        preferred_component = str(preferred_row.get("Component", "")).strip().lower()
+        if (
+            (part_name and preferred_part == part_name.lower())
+            or (serial and preferred_serial == serial.lower())
+            or (component and preferred_component == component.lower())
+        ):
+            match_index = preferred_index
+            if not location:
+                location = str(preferred_row.get("Location", "")).strip()
+            if not supplier:
+                supplier = str(preferred_row.get("Supplier", "")).strip()
+            if not min_level:
+                min_level = str(preferred_row.get("Min Level", "")).strip() or "0"
+            if not item_type:
+                item_type = str(preferred_row.get("Item Type", "")).strip() or "Part"
     for index, inv_row in enumerate(rows):
+        if match_index is not None:
+            break
         if str(inv_row.get("Part Name", "")).strip().lower() != part_name.lower():
             continue
         if str(inv_row.get("Serial Number", "")).strip().lower() != serial.lower():
@@ -2088,6 +4234,10 @@ def sync_part_order_into_inventory(row: dict[str, str], payload: dict) -> None:
             continue
         match_index = index
         break
+    if match_index is not None and not location:
+        location = str(rows[match_index].get("Location", "")).strip()
+    if not location:
+        return False
     if match_index is None:
         rows.append(
             {
@@ -2117,6 +4267,7 @@ def sync_part_order_into_inventory(row: dict[str, str], payload: dict) -> None:
         if min_level:
             rows[match_index]["Min Level"] = min_level
     write_csv_rows(PARTS_INVENTORY, rows, fieldnames)
+    return True
 
 
 def delete_part_order_action(payload: dict) -> JsonResponse:
@@ -2181,6 +4332,18 @@ def complete_maintenance_task_action(payload: dict) -> JsonResponse:
     note = str(payload.get("note", "")).strip()
     if not task_id:
         return JsonResponse({"ok": False, "message": "Task is required."}, 400)
+    runtime_context = get_maintenance_runtime_context()
+    task_row = find_maintenance_task_record(task_id, component, task)
+    if task_row is None:
+        return JsonResponse({"ok": False, "message": "Maintenance task source row was not found."}, 404)
+    source_file = str(task_row.get("Source_File", "")).strip()
+    hours_source = first_task_value(task_row, "Hours Source", "Hours_Source")
+    last_done_updates = maintenance_last_done_updates(hours_source, runtime_context)
+    try:
+        update_maintenance_source_task(source_file, task_id, component, task, last_done_updates)
+    except Exception as exc:
+        return JsonResponse({"ok": False, "message": f"Failed to update maintenance source row: {exc}"}, 400)
+
     rows = read_csv_rows(MAINTENANCE_ACTIONS)
     fieldnames = read_csv_fieldnames(MAINTENANCE_ACTIONS) or [
         "maintenance_id", "maintenance_ts", "maintenance_component", "maintenance_task", "maintenance_task_id",
@@ -2195,17 +4358,104 @@ def complete_maintenance_task_action(payload: dict) -> JsonResponse:
             "maintenance_task": task,
             "maintenance_task_id": task_id,
             "maintenance_mode": mode,
-            "maintenance_hours_source": "",
-            "maintenance_done_date": datetime.now().strftime("%Y-%m-%d"),
-            "maintenance_done_hours": "",
-            "maintenance_done_draw": "",
-            "maintenance_source_file": "",
+            "maintenance_hours_source": normalize_maintenance_hours_source(hours_source),
+            "maintenance_done_date": str(last_done_updates.get("Last_Done_Date", "")),
+            "maintenance_done_hours": str(last_done_updates.get("Last_Done_Hours", "")),
+            "maintenance_done_draw": str(last_done_updates.get("Last_Done_Draw", "")),
+            "maintenance_source_file": source_file,
             "maintenance_actor": "rebuild",
             "maintenance_note": note,
         }
     )
     write_csv_rows(MAINTENANCE_ACTIONS, rows, fieldnames)
-    set_maintenance_state_action({"taskId": task_id, "component": component, "task": task, "state": "DONE_NOW", "note": note})
+
+    refreshed_runtime_context = get_maintenance_runtime_context()
+    updated_task_row = find_maintenance_task_record(task_id, component, task) or task_row
+    due_lookup = build_maintenance_due_lookup(refreshed_runtime_context)
+    due_key = task_id or f"{component.strip().lower()}::{task.strip().lower()}"
+    due_meta = due_lookup.get(due_key, {})
+    next_due_date = parse_dt(str(due_meta.get("next_due_date", "")).strip())
+    schedule_rows = read_csv_rows(TOWER_SCHEDULE)
+    schedule_fieldnames = read_csv_fieldnames(TOWER_SCHEDULE) or SCHEDULE_REQUIRED_COLS[:]
+    schedule_fieldnames = schedule_fieldnames + [field for field in SCHEDULE_REQUIRED_COLS if field not in schedule_fieldnames]
+    task_schedule_rows = [
+        row for row in schedule_rows
+        if f"Task ID: {task_id}" in str(row.get("Description", ""))
+        and "maintenance" in str(row.get("Event Type", "")).strip().lower()
+    ]
+    latest_schedule_row = None
+    latest_schedule_start = None
+    for row in task_schedule_rows:
+        row_start = parse_dt(str(row.get("Start DateTime", "")).strip())
+        if row_start and (latest_schedule_start is None or row_start > latest_schedule_start):
+            latest_schedule_start = row_start
+            latest_schedule_row = row
+
+    duration_minutes = int(
+        round(
+            to_float(
+                first_task_value(updated_task_row, "Est_Duration_Min", "Estimated duration min")
+                or "60"
+            )
+        )
+    ) or 60
+    if latest_schedule_row:
+        prior_start = parse_dt(str(latest_schedule_row.get("Start DateTime", "")).strip())
+        prior_end = parse_dt(str(latest_schedule_row.get("End DateTime", "")).strip())
+        if prior_start and prior_end and prior_end > prior_start:
+            duration_minutes = max(1, int(round((prior_end - prior_start).total_seconds() / 60)))
+
+    next_start = None
+    recurrence = "none"
+    if next_due_date:
+        template_time = latest_schedule_start.time() if latest_schedule_start else datetime.strptime("08:00", "%H:%M").time()
+        next_start = datetime.combine(next_due_date.date(), template_time)
+        recurrence = infer_maintenance_recurrence_from_task(updated_task_row)
+    elif latest_schedule_start:
+        inferred = infer_maintenance_recurrence_from_task(updated_task_row)
+        if inferred != "none":
+            next_start = next_recurrence_dt(latest_schedule_start, inferred)
+            recurrence = inferred
+
+    if next_start:
+        next_end = next_start + timedelta(minutes=max(1, duration_minutes))
+        description = f"Maintenance scheduled: {component} — {task} (Task ID: {task_id})."
+        schedule_rows = [
+            row
+            for row in schedule_rows
+            if not (
+                f"Task ID: {task_id}" in str(row.get("Description", ""))
+                and "maintenance" in str(row.get("Event Type", "")).strip().lower()
+            )
+        ]
+        schedule_rows.append(
+            {
+                "Event Type": "Maintenance",
+                "Start DateTime": next_start.strftime("%Y-%m-%d %H:%M:%S"),
+                "End DateTime": next_end.strftime("%Y-%m-%d %H:%M:%S"),
+                "Description": description,
+                "Recurrence": recurrence,
+            }
+        )
+        write_csv_rows(TOWER_SCHEDULE, schedule_rows, schedule_fieldnames)
+        set_maintenance_state_action(
+            {
+                "taskId": task_id,
+                "component": component,
+                "task": task,
+                "state": "DONE_NOW",
+                "note": f"Completed. Next scheduled for {next_start.strftime('%Y-%m-%d %H:%M')}.",
+            }
+        )
+        return JsonResponse(
+            {
+                "ok": True,
+                "message": f"Maintenance action logged. Next occurrence scheduled for {next_start.strftime('%Y-%m-%d %H:%M')}.",
+                "bootstrap": build_bootstrap_payload().body,
+            }
+        )
+
+    set_maintenance_state_action({"taskId": task_id, "component": component, "task": task, "state": "DONE_NOW", "note": note or "Completed."})
     return JsonResponse({"ok": True, "message": "Maintenance action logged.", "bootstrap": build_bootstrap_payload().body})
 
 
@@ -2345,6 +4595,33 @@ def schedule_maintenance_tasks_action(payload: dict) -> JsonResponse:
     if not normalized_tasks:
         return JsonResponse({"ok": False, "message": "Task is required."}, 400)
 
+    maintenance_summary = summarize_maintenance_rebuild()
+    task_rows = maintenance_summary.get("tasks", [])
+
+    def resolve_schedule_task(task_id: str, component: str, task: str) -> dict[str, object] | None:
+        normalized_task_id = str(task_id or "").strip().lower()
+        normalized_component = str(component or "").strip().lower()
+        normalized_task = str(task or "").strip().lower()
+        for row in task_rows:
+            row_task_id = str(row.get("task_id", "")).strip().lower()
+            if normalized_task_id and row_task_id == normalized_task_id:
+                return row
+        for row in task_rows:
+            row_component = str(row.get("component", "")).strip().lower()
+            row_task = str(row.get("task", "")).strip().lower()
+            if normalized_component and normalized_task and row_component == normalized_component and row_task == normalized_task:
+                return row
+        return None
+
+    for task_entry in normalized_tasks:
+        task_row = resolve_schedule_task(task_entry["task_id"], task_entry["component"], task_entry["task"])
+        if task_row is None:
+            return JsonResponse({"ok": False, "message": f"Maintenance task {task_entry['task_id'] or task_entry['task'] or 'row'} was not found."}, 404)
+        current_state = str(task_row.get("status", "")).strip().upper()
+        if current_state != "PREP_DONE":
+            component_label = str(task_row.get("component", "")).strip() or str(task_entry["component"]).strip() or "Task"
+            return JsonResponse({"ok": False, "message": f"{component_label} must be marked ready before it can be scheduled."}, 400)
+
     rows = read_csv_rows(TOWER_SCHEDULE)
     fieldnames = read_csv_fieldnames(TOWER_SCHEDULE) or SCHEDULE_REQUIRED_COLS[:]
     created = 0
@@ -2442,8 +4719,226 @@ def list_csv_files(directory: Path) -> list[Path]:
     return sorted([path for path in directory.iterdir() if path.is_file() and path.suffix.lower() == ".csv"], key=lambda p: p.stat().st_mtime, reverse=True)
 
 
-def analyze_log_file(log_name: str | None = None, sample_limit: int = 1600) -> dict:
+LOG_DEPRIORITIZED_NAME_HINTS = ("fake", "simulated", "test", "newst", "demo", "sample", "log1")
+LOG_FALLBACK_NAME_HINTS = ("modified_", "adjusted")
+LOG_PRODUCTION_NAME_HINTS = ("training", "fiber_drawing", "tower", "draw")
+
+
+def inspect_log_header_shape(path: Path) -> dict[str, bool]:
+    try:
+        with path.open("r", encoding="utf-8-sig", errors="ignore", newline="") as handle:
+            reader = csv.reader(handle)
+            first_row = next(reader, [])
+            second_row = next(reader, [])
+    except Exception:
+        return {"is_raw": False, "is_friendly": False}
+    first_text = str(first_row[0] or "").strip().lower() if first_row else ""
+    header_row = second_row if first_text == "data log" else first_row
+    lowered = [str(item or "").strip().lower() for item in header_row]
+    is_raw = first_text == "data log" or any(item.startswith("[plc]") or item.startswith("plc]") for item in lowered)
+    is_friendly = any(item in LEGACY_LOG_MAPPED_VALUES_NORMALIZED for item in lowered)
+    return {"is_raw": is_raw, "is_friendly": is_friendly}
+
+
+def dashboard_log_sort_tuple(path: Path) -> tuple[int, int, int, int, float]:
+    name = path.name.lower()
+    stat = path.stat()
+    shape = inspect_log_header_shape(path)
+    is_raw = shape["is_raw"]
+    is_friendly = shape["is_friendly"]
+    is_production_named = any(hint in name for hint in LOG_PRODUCTION_NAME_HINTS)
+    is_fallback_named = any(hint in name for hint in LOG_FALLBACK_NAME_HINTS)
+    is_deprioritized = any(hint in name for hint in LOG_DEPRIORITIZED_NAME_HINTS)
+    return (
+        0 if is_deprioritized else 1,
+        1 if is_raw else 0,
+        1 if is_production_named else 0,
+        1 if is_friendly and not is_fallback_named else 0,
+        stat.st_size,
+        stat.st_mtime,
+    )
+
+
+def list_dashboard_log_files() -> list[Path]:
     files = list_csv_files(LOGS_DIR)
+    return sorted(files, key=dashboard_log_sort_tuple, reverse=True)
+
+
+DRAW_DATASET_CANONICAL_RE = re.compile(r"^(?P<preform>.+?)F(?P<index>\d+)$", re.IGNORECASE)
+DRAW_DATASET_UNDERSCORE_RE = re.compile(r"^(?P<preform>.+?)_F(?P<index>\d+)$", re.IGNORECASE)
+DRAW_DATASET_LEGACY_RE = re.compile(r"^(?P<preform>.+?)F_(?P<index>\d+)$", re.IGNORECASE)
+ZONE_DATASET_RE = re.compile(r"^(?P<draw>.+)_Z(?P<zone>\d+)$", re.IGNORECASE)
+
+
+def normalize_preform_token(value: object) -> str:
+    return re.sub(r"\s+", "", str(value or "").strip())
+
+
+def canonical_draw_dataset_stem(preform: object, index: object) -> str:
+    return f"{normalize_preform_token(preform)}F{int(str(index or '0') or '0')}"
+
+
+def canonical_draw_dataset_filename(csv_name: str) -> str:
+    dataset_file = os.path.basename(str(csv_name or "").strip())
+    if not dataset_file:
+        return ""
+    path = Path(dataset_file)
+    zone_match = ZONE_DATASET_RE.match(path.stem)
+    zone_suffix = f"_Z{zone_match.group('zone')}" if zone_match else ""
+    identity = parse_draw_dataset_identity(path.stem)
+    if not identity:
+        return dataset_file
+    ext = path.suffix or ".csv"
+    return f"{identity['draw_stem']}{zone_suffix}{ext}"
+
+
+def draw_dataset_filename_variants(csv_name: str) -> list[str]:
+    dataset_file = os.path.basename(str(csv_name or "").strip())
+    if not dataset_file:
+        return []
+    path = Path(dataset_file)
+    zone_match = ZONE_DATASET_RE.match(path.stem)
+    zone_suffix = f"_Z{zone_match.group('zone')}" if zone_match else ""
+    identity = parse_draw_dataset_identity(path.stem)
+    if not identity:
+        return [dataset_file]
+    ext = path.suffix or ".csv"
+    preform = str(identity["preform"])
+    index = int(identity["index"])
+    variants = [
+        f"{preform}F{index}{zone_suffix}{ext}",
+        f"{preform}_F{index}{zone_suffix}{ext}",
+        f"{preform}F_{index}{zone_suffix}{ext}",
+    ]
+    return list(dict.fromkeys(variants))
+
+
+def parse_draw_dataset_identity(stem: str) -> dict[str, object] | None:
+    text = normalize_preform_token(stem)
+    if not text:
+        return None
+    zone_match = ZONE_DATASET_RE.match(text)
+    if zone_match:
+        text = str(zone_match.group("draw") or "").strip()
+    for pattern in (DRAW_DATASET_UNDERSCORE_RE, DRAW_DATASET_LEGACY_RE, DRAW_DATASET_CANONICAL_RE):
+        match = pattern.match(text)
+        if not match:
+            continue
+        preform = normalize_preform_token(match.group("preform"))
+        index = int(str(match.group("index") or "0") or "0")
+        if not preform or index <= 0:
+            continue
+        return {
+            "preform": preform,
+            "index": index,
+            "draw_stem": canonical_draw_dataset_stem(preform, index),
+        }
+    return None
+
+
+def is_zone_dataset_path(path: Path) -> bool:
+    return bool(ZONE_DATASET_RE.match(path.stem))
+
+
+def looks_like_dataset_snapshot_path(path: Path) -> bool:
+    if not path.exists() or not path.is_file() or path.suffix.lower() != ".csv":
+        return False
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            header = reader.fieldnames or []
+            normalized_header = [str(item or "").strip() for item in header]
+            if normalized_header != ["Parameter Name", "Value", "Units"]:
+                return False
+            for index, row in enumerate(reader):
+                parameter_name = str((row or {}).get("Parameter Name", "")).strip()
+                if parameter_name in {"=== ORDER PARAMETERS ===", "=== ZONE SNAPSHOT ==="}:
+                    return True
+                if index >= 40:
+                    break
+    except Exception:
+        return False
+    return False
+
+
+def dataset_directory_for_draw_name(csv_name: str) -> Path:
+    stem = Path(str(csv_name or "").strip()).stem
+    identity = parse_draw_dataset_identity(stem)
+    if identity:
+        return DATASET_DIR / str(identity["preform"])
+    return DATASET_DIR
+
+
+def full_dataset_target_path(csv_name: str) -> Path:
+    dataset_file = canonical_draw_dataset_filename(csv_name)
+    return dataset_directory_for_draw_name(dataset_file) / dataset_file
+
+
+def zone_dataset_target_path(csv_name: str, zone_number: int) -> Path:
+    dataset_file = canonical_draw_dataset_filename(csv_name)
+    identity = parse_draw_dataset_identity(Path(dataset_file).stem)
+    draw_stem = str(identity["draw_stem"]) if identity else Path(dataset_file).stem
+    zone_folder_name = f"{draw_stem}_Z{zone_number}"
+    existing_dataset_path = resolve_dataset_csv_path(dataset_file)
+    parent_dir = existing_dataset_path.parent if existing_dataset_path else dataset_directory_for_draw_name(dataset_file)
+    return parent_dir / zone_folder_name / f"{zone_folder_name}.csv"
+
+
+def list_dataset_csv_files(include_zone_files: bool = False) -> list[Path]:
+    if not DATASET_DIR.exists():
+        return []
+    files = [
+        path
+        for path in DATASET_DIR.rglob("*.csv")
+        if path.is_file()
+        and path.name != "_conversion_audit.csv"
+        and looks_like_dataset_snapshot_path(path)
+    ]
+    if not include_zone_files:
+        files = [path for path in files if not is_zone_dataset_path(path)]
+    return sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def list_recent_dataset_files(limit: int = 6) -> list[dict]:
+    output = []
+    for path in list_dataset_csv_files()[:limit]:
+        stat = path.stat()
+        output.append(
+            {
+                "name": path.name,
+                "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
+                "size_kb": round(stat.st_size / 1024, 1),
+            }
+        )
+    return output
+
+
+def resolve_dataset_csv_path(csv_name: str, include_zone_files: bool = False) -> Path | None:
+    dataset_file = os.path.basename(str(csv_name or "").strip())
+    if not dataset_file:
+        return None
+    variants = draw_dataset_filename_variants(dataset_file)
+    for candidate in variants:
+        direct = DATASET_DIR / candidate
+        if direct.exists() and direct.is_file() and (include_zone_files or not is_zone_dataset_path(direct)):
+            return direct
+        target = full_dataset_target_path(candidate)
+        if target.exists() and target.is_file() and (include_zone_files or not is_zone_dataset_path(target)):
+            return target
+    matches = [
+        path
+        for path in list_dataset_csv_files(include_zone_files=include_zone_files)
+        if path.name in variants
+    ]
+    if not matches:
+        return None
+    rank = {name: index for index, name in enumerate(variants)}
+    matches.sort(key=lambda path: rank.get(path.name, len(rank)))
+    return matches[0]
+
+
+def analyze_log_file(log_name: str | None = None, sample_limit: int = 1600) -> dict:
+    files = list_dashboard_log_files()
     if not files:
         return {
             "selected_file": "",
@@ -2451,12 +4946,13 @@ def analyze_log_file(log_name: str | None = None, sample_limit: int = 1600) -> d
             "x_options": [],
             "numeric_columns": [],
             "rows": [],
+            "display_labels": {},
             "sample_count": 0,
             "total_rows": 0,
         }
     by_name = {path.name: path for path in files}
     selected_path = by_name.get(str(log_name or "").strip(), files[0])
-    rows = read_csv_rows(selected_path)
+    rows, display_labels = load_log_csv_rows(selected_path)
     if not rows:
         return {
             "selected_file": selected_path.name,
@@ -2464,6 +4960,7 @@ def analyze_log_file(log_name: str | None = None, sample_limit: int = 1600) -> d
             "x_options": [],
             "numeric_columns": [],
             "rows": [],
+            "display_labels": {},
             "sample_count": 0,
             "total_rows": 0,
         }
@@ -2524,6 +5021,7 @@ def analyze_log_file(log_name: str | None = None, sample_limit: int = 1600) -> d
         "x_options": headers,
         "numeric_columns": numeric_columns,
         "rows": compact_rows,
+        "display_labels": display_labels,
         "x_series": x_series,
         "x_display": x_display,
         "x_kinds": x_kinds,
@@ -2654,7 +5152,14 @@ def summarize_order_draw() -> dict:
             scheduled_orders.append(row)
         else:
             completed_orders.append(row)
-    sap_sets = next((row for row in sap_items if str(row.get("Item", "")).strip().lower() == "sap rods set"), sap_items[0] if sap_items else {})
+    sap_sets = next(
+        (
+            row
+            for row in sap_items
+            if str(row.get("Item") or row.get("Item Name") or "").strip().lower() == "sap rods set"
+        ),
+        sap_items[0] if sap_items else {},
+    )
     sap_count = to_float(sap_sets.get("Count"))
     return {
         "status_counts": status_counts,
@@ -2680,7 +5185,7 @@ def summarize_order_draw() -> dict:
             "geometry_options": ORDER_DRAW_GEOMETRY_OPTIONS,
         },
         "sap_summary": {
-            "item": sap_sets.get("Item", "SAP Rods Set"),
+            "item": sap_sets.get("Item") or sap_sets.get("Item Name") or "SAP Rods Set",
             "count": sap_count,
             "units": sap_sets.get("Units", "sets"),
             "last_updated": sap_sets.get("Last Updated", ""),
@@ -2690,21 +5195,76 @@ def summarize_order_draw() -> dict:
     }
 
 
+def decrement_sap_rods_set_for_panda_draw(source_draw: str) -> tuple[bool, str]:
+    when_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    source_label = str(source_draw or "").strip() or "Unnamed draw"
+    default_fieldnames = ["Item", "Count", "Units", "Last Updated", "Notes"]
+    with hold_request_lock(SAP_RODS_INVENTORY):
+        rows = read_csv_rows(SAP_RODS_INVENTORY)
+        fieldnames = read_csv_fieldnames(SAP_RODS_INVENTORY) or default_fieldnames
+        fieldnames = fieldnames + [field for field in default_fieldnames if field not in fieldnames]
+        target_row = None
+        for row in rows:
+            item_name = str(row.get("Item") or row.get("Item Name") or "").strip().lower()
+            if item_name == "sap rods set":
+                target_row = row
+                break
+        if target_row is None:
+            target_row = {
+                "Item": "SAP Rods Set",
+                "Count": 0,
+                "Units": "sets",
+                "Last Updated": when_str,
+                "Notes": "Auto-added row",
+            }
+            rows.append(target_row)
+        current_count = max(0, int(round(to_float(target_row.get("Count")))))
+        note_prefix = str(target_row.get("Notes", "")).strip()
+        if current_count < 1:
+            warning_note = f"[{when_str}] Attempted decrement for PANDA - PM draw {source_label} but Count was 0."
+            target_row["Item"] = str(target_row.get("Item") or target_row.get("Item Name") or "SAP Rods Set").strip() or "SAP Rods Set"
+            target_row["Count"] = current_count
+            target_row["Units"] = str(target_row.get("Units", "")).strip() or "sets"
+            target_row["Last Updated"] = when_str
+            target_row["Notes"] = f"{note_prefix}\n{warning_note}".strip() if note_prefix else warning_note
+            if "Item Name" in fieldnames and "Item Name" in target_row:
+                target_row["Item Name"] = target_row["Item"]
+            write_csv_rows(SAP_RODS_INVENTORY, rows, fieldnames)
+            return False, "SAP rods inventory is empty, so no set was deducted."
+        target_row["Item"] = str(target_row.get("Item") or target_row.get("Item Name") or "SAP Rods Set").strip() or "SAP Rods Set"
+        target_row["Count"] = current_count - 1
+        target_row["Units"] = str(target_row.get("Units", "")).strip() or "sets"
+        target_row["Last Updated"] = when_str
+        success_note = f"[{when_str}] -1 set reserved for PANDA - PM draw {source_label}. New Count={current_count - 1}."
+        target_row["Notes"] = f"{note_prefix}\n{success_note}".strip() if note_prefix else success_note
+        if "Item Name" in fieldnames and "Item Name" in target_row:
+            target_row["Item Name"] = target_row["Item"]
+        write_csv_rows(SAP_RODS_INVENTORY, rows, fieldnames)
+    return True, "SAP rods auto-reserved for this PANDA - PM draw."
+
+
 def summarize_dashboard() -> dict:
     draws = summarize_draw_orders()
     schedule = summarize_schedule()
     parts = summarize_part_orders()
     inventory = summarize_inventory()
-    log_csvs = list_csv_files(LOGS_DIR)
-    dataset_csvs = list_csv_files(DATASET_DIR)
-    dataset_files = list_recent_files(DATASET_DIR)
-    log_files = list_recent_files(LOGS_DIR)
+    log_csvs = list_dashboard_log_files()
+    dataset_csvs = list_dataset_csv_files()
+    dataset_files = list_recent_dataset_files()
+    log_files = [
+        {
+            "name": path.name,
+            "modified": datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+            "size_kb": round(path.stat().st_size / 1024, 1),
+        }
+        for path in log_csvs[:6]
+    ]
     report_files = list_recent_files(REPORTS_DIR, suffixes=(".csv", ".json", ".pdf", ".log"))
     return {
         "metrics": [
-            {"label": "Dataset CSVs", "value": len(list(DATASET_DIR.glob("*.csv"))) if DATASET_DIR.exists() else 0},
+            {"label": "Dataset CSVs", "value": len(dataset_csvs)},
             {"label": "Log CSVs", "value": len(list(LOGS_DIR.glob("*.csv"))) if LOGS_DIR.exists() else 0},
-            {"label": "Active Draws", "value": draws["active"]},
+            {"label": "Active Draws", "value": draws["in_progress"]},
             {"label": "Open Part Orders", "value": len(parts["open_orders"])},
         ],
         "draw_status_series": [{"label": key, "value": value} for key, value in draws["status_counts"].items()],
@@ -2724,6 +5284,7 @@ def summarize_diagnostics() -> dict:
     ensure_app_weekly_full_backup()
     tracked_paths = current_tracked_paths()
     defaults = tracked_path_defaults()
+    container_logger_status = current_container_logger_status()
     path_rows = []
     ready_count = 0
     for item, path in tracked_paths:
@@ -2766,7 +5327,7 @@ def summarize_diagnostics() -> dict:
                 "missing_columns": ", ".join(missing),
             }
         )
-    dataset_files = list_csv_files(DATASET_DIR)
+    dataset_files = list_dataset_csv_files()
     log_files = list_csv_files(LOGS_DIR)
     path_ok = ready_count == len(tracked_paths)
     schema_ok = all(item["ok"] for item in schema_rows)
@@ -2813,6 +5374,12 @@ def summarize_diagnostics() -> dict:
             "ok": bool(reports_path and reports_path["status"] == "READY"),
             "detail": f"{report_file_count} report files are reachable in the report center.",
         },
+        {
+            "key": "container_logger",
+            "label": "Container logger",
+            "ok": str(container_logger_status.get("state", "")).strip() == "running",
+            "detail": str(container_logger_status.get("message", "")).strip() or "Container logger status unavailable.",
+        },
     ]
     passed_checks = sum(1 for item in health_checks if item["ok"])
     overall_ok = passed_checks == len(health_checks)
@@ -2829,6 +5396,7 @@ def summarize_diagnostics() -> dict:
         "full_backup_count": full_backup_snapshots,
         "latest_full_backup": latest_full_backup,
         "full_backup_policy_label": FULL_BACKUP_POLICY_LABEL,
+        "container_logger": container_logger_status,
         "health_checks": health_checks,
         "passed_checks": passed_checks,
         "total_checks": len(health_checks),
@@ -2863,34 +5431,465 @@ def load_consumables_temp_setpoints(latest_temps: dict[str, str] | None = None) 
     return setpoints
 
 
+def normalize_container_sensor_column(value: object, label: str) -> str:
+    text = str(value or "").strip().lower()
+    if text in CONTAINER_SENSOR_OPTIONS:
+        return text
+    return CONTAINER_SENSOR_DEFAULTS.get(label, "tank1")
+
+
+def normalize_container_config(raw: dict | None) -> dict[str, dict[str, object]]:
+    source = raw if isinstance(raw, dict) else {}
+    cleaned: dict[str, dict[str, object]] = {}
+    for label in ["A", "B", "C", "D"]:
+        current = source.get(label, {})
+        current = current if isinstance(current, dict) else {}
+        diameter_mm = round(to_float(current.get("diameter_mm", current.get("diameter", DEFAULT_CONTAINER_DIAMETER_MM))), 2)
+        fill_height_mm = round(
+            to_float(
+                current.get(
+                    "fill_height_mm",
+                    current.get("height_mm", current.get("working_height_mm", DEFAULT_CONTAINER_FILL_HEIGHT_MM)),
+                )
+            ),
+            2,
+        )
+        cleaned[label] = {
+            "type": str(current.get("type", "")).strip(),
+            "sensor_column": normalize_container_sensor_column(current.get("sensor_column", current.get("sensor")), label),
+            "diameter_mm": diameter_mm if diameter_mm > 0 else DEFAULT_CONTAINER_DIAMETER_MM,
+            "fill_height_mm": fill_height_mm if fill_height_mm > 0 else DEFAULT_CONTAINER_FILL_HEIGHT_MM,
+        }
+    return cleaned
+
+
+def coating_density_to_kg_per_l(raw_density: object) -> float:
+    density = to_float(raw_density)
+    if density <= 0:
+        return DEFAULT_CONTAINER_DENSITY_KG_PER_L
+    if density > 10000:
+        return round(density / 1_000_000.0, 4)
+    if density > 10:
+        return round(density / 1000.0, 4)
+    return round(density, 4)
+
+
+def cylinder_volume_liters(diameter_mm: object, fill_height_mm: object) -> float:
+    diameter = to_float(diameter_mm)
+    height = to_float(fill_height_mm)
+    if diameter <= 0 or height <= 0:
+        return 0.0
+    radius_mm = diameter / 2.0
+    volume_mm3 = math.pi * (radius_mm ** 2) * height
+    return round(volume_mm3 / 1_000_000.0, 2)
+
+
+def read_container_live_feed(path: Path) -> dict[str, object]:
+    rows = read_csv_rows(path)
+    latest: dict[str, str] = {}
+    normalized: dict[str, object] = {}
+    for candidate in reversed(rows):
+        current = {str(key or "").strip().lower(): value for key, value in candidate.items()}
+        timestamp_value = str(current.get("timestamp") or current.get("updated_at") or "").strip()
+        has_percent_fields = any(sensor in current for sensor in CONTAINER_SENSOR_OPTIONS)
+        has_percent_sample = any(str(current.get(sensor, "")).strip() for sensor in CONTAINER_SENSOR_OPTIONS)
+        has_legacy_fields = any(f"{label}_level_kg" in candidate or f"{label}_type" in candidate for label in ["A", "B", "C", "D"])
+        has_legacy_sample = any(
+            str(candidate.get(f"{label}_level_kg", "")).strip() or str(candidate.get(f"{label}_type", "")).strip()
+            for label in ["A", "B", "C", "D"]
+        )
+        if timestamp_value or has_percent_fields or has_percent_sample or has_legacy_fields or has_legacy_sample:
+            latest = candidate
+            normalized = current
+            break
+    if not latest:
+        return {"mode": "empty", "timestamp": "", "percents": {}, "levels": {}, "types": {}, "raw": {}, "age_seconds": None, "sensor_states": {}}
+    timestamp_text = str(normalized.get("timestamp") or normalized.get("updated_at") or "").strip()
+    parsed_timestamp = parse_dt(timestamp_text)
+    age_seconds: float | None = None
+    if parsed_timestamp is not None:
+        age_seconds = round(max(0.0, (datetime.now() - parsed_timestamp).total_seconds()), 2)
+    is_stale = age_seconds is not None and age_seconds > CONTAINER_FEED_STALE_SECONDS
+    if any(sensor in normalized for sensor in CONTAINER_SENSOR_OPTIONS):
+        sensor_states: dict[str, str] = {}
+        sensor_timestamps: dict[str, str] = {}
+        percents: dict[str, float] = {}
+        display_percents: dict[str, float] = {}
+        for sensor in CONTAINER_SENSOR_OPTIONS:
+            sensor_value: float | None = None
+            sensor_age: float | None = None
+            sensor_timestamp_text = ""
+            recent_values: list[float] = []
+            for candidate in reversed(rows):
+                current = {str(key or "").strip().lower(): value for key, value in candidate.items()}
+                if sensor not in current:
+                    continue
+                raw_value = str(current.get(sensor, "")).strip()
+                if not raw_value:
+                    continue
+                parsed_value = to_float(raw_value)
+                if parsed_value is None:
+                    continue
+                sensor_timestamp_text = str(current.get("timestamp") or current.get("updated_at") or "").strip()
+                parsed_sensor_ts = parse_dt(sensor_timestamp_text)
+                if parsed_sensor_ts is not None:
+                    sensor_age = round(max(0.0, (datetime.now() - parsed_sensor_ts).total_seconds()), 2)
+                bounded_value = round(max(0.0, min(100.0, parsed_value)), 2)
+                if sensor_value is None:
+                    sensor_value = bounded_value
+                if sensor_age is None or sensor_age <= CONTAINER_FEED_STALE_SECONDS:
+                    recent_values.append(bounded_value)
+                    if len(recent_values) >= CONTAINER_FEED_SMOOTHING_SAMPLES:
+                        break
+            if sensor_value is None:
+                sensor_states[sensor] = "disconnected"
+                continue
+            if sensor_age is not None and sensor_age > CONTAINER_FEED_STALE_SECONDS:
+                sensor_states[sensor] = "stale"
+                continue
+            percents[sensor] = sensor_value
+            display_percents[sensor] = round(sum(recent_values) / len(recent_values), 2) if recent_values else sensor_value
+            sensor_states[sensor] = "live"
+            if sensor_timestamp_text:
+                sensor_timestamps[sensor] = sensor_timestamp_text
+        if not percents:
+            return {
+                "mode": "stale" if is_stale else "disconnected",
+                "timestamp": timestamp_text,
+                "percents": {},
+                "levels": {},
+                "types": {},
+                "raw": latest,
+                "age_seconds": age_seconds,
+                "sensor_states": sensor_states,
+            }
+        return {
+            "mode": "percent",
+            "timestamp": timestamp_text,
+            "percents": percents,
+            "display_percents": display_percents,
+            "levels": {},
+            "types": {},
+            "raw": latest,
+            "age_seconds": age_seconds,
+            "sensor_states": sensor_states,
+            "sensor_timestamps": sensor_timestamps,
+        }
+    has_live_legacy_sample = any(
+        str(latest.get(f"{label}_level_kg", "")).strip() or str(latest.get(f"{label}_type", "")).strip()
+        for label in ["A", "B", "C", "D"]
+    )
+    if not has_live_legacy_sample:
+        return {
+            "mode": "disconnected",
+            "timestamp": timestamp_text,
+            "percents": {},
+            "levels": {},
+            "types": {},
+            "raw": latest,
+            "age_seconds": age_seconds,
+            "sensor_states": {},
+        }
+    if is_stale:
+        return {
+            "mode": "stale",
+            "timestamp": timestamp_text,
+            "percents": {},
+            "levels": {},
+            "types": {},
+            "raw": latest,
+            "age_seconds": age_seconds,
+            "sensor_states": {},
+        }
+    levels = {label: round(to_float(latest.get(f"{label}_level_kg")), 2) for label in ["A", "B", "C", "D"]}
+    types = {label: str(latest.get(f"{label}_type", "")).strip() for label in ["A", "B", "C", "D"]}
+    return {
+        "mode": "legacy",
+        "timestamp": timestamp_text,
+        "percents": {},
+        "levels": levels,
+        "types": types,
+        "raw": latest,
+        "age_seconds": age_seconds,
+        "sensor_states": {},
+    }
+
+
+def container_feed_signature(feed: dict[str, object] | None) -> str:
+    current = feed if isinstance(feed, dict) else {}
+    mode = str(current.get("mode", "")).strip()
+    payload: dict[str, object] = {
+        "mode": mode,
+        "timestamp": str(current.get("timestamp", "")).strip(),
+    }
+    if mode == "percent":
+        payload.update(
+            {
+                sensor: round(to_float((current.get("percents", {}) or {}).get(sensor)), 2)
+                for sensor in CONTAINER_SENSOR_OPTIONS
+            }
+        )
+        payload["sensor_states"] = {
+            sensor: str((current.get("sensor_states", {}) or {}).get(sensor, "")).strip()
+            for sensor in CONTAINER_SENSOR_OPTIONS
+        }
+    else:
+        for label in ["A", "B", "C", "D"]:
+            payload[f"{label}_level"] = round(to_float((current.get("levels", {}) or {}).get(label)), 2)
+            payload[f"{label}_type"] = str((current.get("types", {}) or {}).get(label, "")).strip()
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def normalize_container_snapshot(raw: dict | None) -> dict[str, object]:
+    source = raw if isinstance(raw, dict) else {}
+    raw_containers = source.get("containers")
+    if not isinstance(raw_containers, dict):
+        raw_containers = {
+            label: source.get(label, {})
+            for label in ["A", "B", "C", "D"]
+            if isinstance(source.get(label, {}), dict)
+        }
+    containers: dict[str, dict[str, object]] = {}
+    for label in ["A", "B", "C", "D"]:
+        current = raw_containers.get(label, {})
+        current = current if isinstance(current, dict) else {}
+        containers[label] = {
+            "level": round(to_float(current.get("level", current.get("level_kg", 0.0))), 2),
+            "fill_percent": round(to_float(current.get("fill_percent", 0.0)), 2),
+            "raw_level": round(to_float(current.get("raw_level", current.get("raw_level_kg", current.get("level", current.get("level_kg", 0.0))))), 2),
+            "raw_fill_percent": round(to_float(current.get("raw_fill_percent", current.get("fill_percent", 0.0))), 2),
+            "type": str(current.get("type", "")).strip(),
+            "updated_at": str(current.get("updated_at", "")).strip(),
+        }
+    return {
+        "feed_signature": str(source.get("_feed_signature") or source.get("feed_signature") or "").strip(),
+        "updated_at": str(source.get("_updated_at") or source.get("updated_at") or "").strip(),
+        "containers": containers,
+    }
+
+
+def build_container_snapshot_payload(container_cards: list[dict], feed_signature: str, updated_at: str) -> dict[str, object]:
+    return {
+        "_feed_signature": str(feed_signature or "").strip(),
+        "_updated_at": str(updated_at or "").strip(),
+        "containers": {
+            str(item.get("label", "")).strip(): {
+                "level": round(to_float(item.get("level")), 2),
+                "fill_percent": round(to_float(item.get("fill_percent")), 2),
+                "raw_level": round(to_float(item.get("raw_level", item.get("level"))), 2),
+                "raw_fill_percent": round(to_float(item.get("raw_fill_percent", item.get("fill_percent"))), 2),
+                "type": str(item.get("type", "")).strip(),
+                "updated_at": str(item.get("updated_at", "")).strip(),
+            }
+            for item in container_cards
+            if str(item.get("label", "")).strip()
+        },
+    }
+
+
+def auto_adjust_warehouse_from_container_refill(
+    feed: dict[str, object],
+    container_cards: list[dict],
+    stock_map: dict | None,
+) -> tuple[dict[str, float], list[dict[str, object]]]:
+    next_stock_map = {str(key): round(to_float(value), 2) for key, value in (stock_map or {}).items()}
+    snapshot = normalize_container_snapshot(read_json_value(CONTAINER_SNAPSHOT, {}))
+    signature = container_feed_signature(feed)
+    updated_at = str(feed.get("timestamp", "")).strip() if isinstance(feed, dict) else ""
+    current_snapshot = build_container_snapshot_payload(container_cards, signature, updated_at)
+    if not signature:
+        write_json_value(CONTAINER_SNAPSHOT, current_snapshot)
+        return next_stock_map, []
+    if not snapshot.get("feed_signature"):
+        write_json_value(CONTAINER_SNAPSHOT, current_snapshot)
+        return next_stock_map, []
+    if snapshot.get("feed_signature") == signature:
+        return next_stock_map, []
+
+    events: list[dict[str, object]] = []
+    previous_containers = snapshot.get("containers", {})
+    previous_containers = previous_containers if isinstance(previous_containers, dict) else {}
+    for item in container_cards:
+        label = str(item.get("label", "")).strip()
+        kind = str(item.get("type", "")).strip()
+        previous = previous_containers.get(label, {})
+        previous = previous if isinstance(previous, dict) else {}
+        previous_type = str(previous.get("type", "")).strip()
+        if not label or not kind or not previous_type or previous_type != kind:
+            continue
+        current_level = round(to_float(item.get("raw_level", item.get("level"))), 2)
+        previous_level = round(to_float(previous.get("raw_level", previous.get("level"))), 2)
+        current_fill = round(to_float(item.get("raw_fill_percent", item.get("fill_percent"))), 2)
+        previous_fill = round(to_float(previous.get("raw_fill_percent", previous.get("fill_percent"))), 2)
+        delta_kg = round(current_level - previous_level, 2)
+        delta_fill_percent = round(current_fill - previous_fill, 2)
+        if delta_kg <= AUTO_CONTAINER_REFILL_MIN_KG or delta_fill_percent < AUTO_CONTAINER_REFILL_MIN_PERCENT:
+            continue
+        full_capacity_kg = 0.0
+        if current_fill > 0:
+            full_capacity_kg = round((current_level / current_fill) * 100.0, 2)
+        if full_capacity_kg > 0 and delta_kg > full_capacity_kg * 1.05:
+            continue
+        previous_warehouse = round(to_float(next_stock_map.get(kind)), 2)
+        next_warehouse = round(max(0.0, previous_warehouse - delta_kg), 2)
+        if abs(next_warehouse - previous_warehouse) < 0.01:
+            continue
+        next_stock_map[kind] = next_warehouse
+        events.append(
+            {
+                "label": label,
+                "type": kind,
+                "delta_kg": delta_kg,
+                "previous_warehouse_kg": previous_warehouse,
+                "next_warehouse_kg": next_warehouse,
+            }
+        )
+
+    if events:
+        write_json_value(COATING_STOCK, next_stock_map)
+    write_json_value(CONTAINER_SNAPSHOT, current_snapshot)
+    return next_stock_map, events
+
+
+def known_consumables_coating_types(
+    stock_map: dict | None = None,
+    coating_config: dict | None = None,
+    latest_containers: dict[str, str] | None = None,
+) -> list[str]:
+    known: set[str] = set()
+
+    def add_type(value: object) -> None:
+        text = str(value or "").strip()
+        if text:
+            known.add(text)
+
+    for key in (stock_map or {}).keys():
+        add_type(key)
+    for key in ((coating_config or {}).get("coatings", {}) or {}).keys():
+        add_type(key)
+    container_defaults = read_json_dict(CONTAINER_CONFIG)
+    latest_containers = latest_containers or {}
+    for label in ["A", "B", "C", "D"]:
+        add_type(latest_containers.get(f"{label}_type"))
+        add_type((container_defaults.get(label) or {}).get("type"))
+    for row in read_csv_rows(DRAW_ORDERS):
+        add_type(row.get("Main Coating"))
+        add_type(row.get("Secondary Coating"))
+    for row in read_csv_rows(PROJECTS_TEMPLATES):
+        add_type(row.get("Main Coating"))
+        add_type(row.get("Secondary Coating"))
+    for path in list_dataset_csv_files():
+        for row in read_csv_rows(path):
+            param = str(row.get("Parameter Name", "")).strip()
+            if param not in {
+                "Order__Main Coating",
+                "Order__Secondary Coating",
+                "Process__Primary Coating",
+                "Process__Secondary Coating",
+            }:
+                continue
+            add_type(row.get("Value"))
+    return sorted(known, key=str.lower)
+
+
+def read_consumables_inventory_meta() -> dict[str, dict[str, float]]:
+    raw = read_json_value(COATING_INVENTORY_META, {})
+    if not isinstance(raw, dict):
+        return {}
+    cleaned: dict[str, dict[str, float]] = {}
+    for label, value in raw.items():
+        key = str(label or "").strip()
+        if not key:
+            continue
+        if isinstance(value, dict):
+            cleaned[key] = {
+                "min_stock_kg": round(to_float(value.get("min_stock_kg", DEFAULT_COATING_MIN_STOCK_KG)), 2),
+            }
+        else:
+            cleaned[key] = {
+                "min_stock_kg": round(to_float(value), 2),
+            }
+    return cleaned
+
+
 def summarize_consumables() -> dict:
-    latest_containers = latest_csv_row(TOWER_CONTAINERS)
+    latest_containers = read_container_live_feed(TOWER_CONTAINERS)
     latest_temps = latest_csv_row(TOWER_TEMPS)
     stock_map = read_json_value(COATING_STOCK, {})
+    inventory_meta = read_consumables_inventory_meta()
     dies_map = read_json_value(DIES_CONFIG, {})
     temp_setpoints = load_consumables_temp_setpoints(latest_temps)
     coating_config = read_json_value(COATING_CONFIG, {})
+    coating_definitions = coating_config.get("coatings", {}) if isinstance(coating_config, dict) else {}
+    container_defaults = normalize_container_config(read_json_dict(CONTAINER_CONFIG))
+    container_logger_status = current_container_logger_status()
+    container_feed_mode = str(latest_containers.get("mode", "")).strip() or "empty"
+    container_feed_is_live = container_feed_mode in {"percent", "legacy"}
     argon_rows = read_csv_rows(ARGON_MONTHLY_REPORT)
     container_cards = []
-    total_level = 0.0
     low_count = 0
     type_counts: dict[str, float] = {}
+    latest_container_type_fields: dict[str, str] = {}
     for label in ["A", "B", "C", "D"]:
-        level = to_float(latest_containers.get(f"{label}_level_kg"))
-        kind = str(latest_containers.get(f"{label}_type", "")).strip() or str(read_json_dict(CONTAINER_CONFIG).get(label, {}).get("type", ""))
-        total_level += level
-        if level < 1.0:
+        defaults = container_defaults.get(label, {})
+        kind = str((latest_containers.get("types", {}) or {}).get(label, "")).strip() or str(defaults.get("type", "")).strip()
+        sensor_column = str(defaults.get("sensor_column", CONTAINER_SENSOR_DEFAULTS.get(label, "tank1"))).strip() or CONTAINER_SENSOR_DEFAULTS.get(label, "tank1")
+        diameter_mm = round(to_float(defaults.get("diameter_mm", DEFAULT_CONTAINER_DIAMETER_MM)), 2)
+        fill_height_mm = round(to_float(defaults.get("fill_height_mm", DEFAULT_CONTAINER_FILL_HEIGHT_MM)), 2)
+        density_kg_per_l = coating_density_to_kg_per_l((coating_definitions.get(kind, {}) or {}).get("Density", ""))
+        full_volume_l = cylinder_volume_liters(diameter_mm, fill_height_mm)
+        sensor_state = str((latest_containers.get("sensor_states", {}) or {}).get(sensor_column, "")).strip()
+        if latest_containers.get("mode") == "percent":
+            raw_fill_percent = round(to_float((latest_containers.get("percents", {}) or {}).get(sensor_column)), 2)
+            fill_percent = round(
+                to_float((latest_containers.get("display_percents", {}) or {}).get(sensor_column, raw_fill_percent)),
+                2,
+            )
+            volume_l = round(full_volume_l * (fill_percent / 100.0), 2)
+            level = round(volume_l * density_kg_per_l, 2)
+            raw_volume_l = round(full_volume_l * (raw_fill_percent / 100.0), 2)
+            raw_level = round(raw_volume_l * density_kg_per_l, 2)
+            current_live_state = sensor_state or "live"
+        elif latest_containers.get("mode") == "legacy":
+            level = round(to_float((latest_containers.get("levels", {}) or {}).get(label)), 2)
+            volume_l = round(level / density_kg_per_l, 2) if density_kg_per_l > 0 else 0.0
+            fill_percent = round((volume_l / full_volume_l) * 100.0, 2) if full_volume_l > 0 else 0.0
+            raw_level = level
+            raw_fill_percent = fill_percent
+            current_live_state = "live"
+        else:
+            fill_percent = 0.0
+            volume_l = 0.0
+            level = 0.0
+            raw_level = 0.0
+            raw_fill_percent = 0.0
+            current_live_state = container_feed_mode
+        is_low = container_feed_is_live and (fill_percent <= DEFAULT_CONTAINER_LOW_PERCENT or level < 1.0)
+        if is_low:
             low_count += 1
-        type_counts[kind or f"Container {label}"] = type_counts.get(kind or f"Container {label}", 0.0) + level
+        if container_feed_is_live and level > 0:
+            type_counts[kind or f"Container {label}"] = type_counts.get(kind or f"Container {label}", 0.0) + level
+        latest_container_type_fields[f"{label}_type"] = kind
         container_cards.append(
             {
                 "label": label,
-                "level": level,
+                "level": round(level, 2),
                 "type": kind or "Unassigned",
-                "low": level < 1.0,
-                "updated_at": latest_containers.get("updated_at", ""),
+                "low": is_low,
+                "updated_at": str(latest_containers.get("timestamp", "")).strip(),
+                "fill_percent": round(fill_percent, 2),
+                "raw_fill_percent": round(raw_fill_percent, 2),
+                "volume_l": round(volume_l, 2),
+                "raw_level": round(raw_level, 2),
+                "sensor_column": sensor_column,
+                "diameter_mm": diameter_mm,
+                "fill_height_mm": fill_height_mm,
+                "density_kg_per_l": density_kg_per_l,
+                "live_state": current_live_state,
             }
         )
+    stock_map, container_refill_events = auto_adjust_warehouse_from_container_refill(latest_containers, container_cards, stock_map)
+    known_coatings = known_consumables_coating_types(stock_map, coating_config, latest_container_type_fields)
     temp_holders = []
     for key, label in [
         ("die_holder_primary_c", "Primary holder"),
@@ -2937,16 +5936,39 @@ def summarize_consumables() -> dict:
             }
         )
     stock_rows = []
-    for key, value in sorted((stock_map or {}).items(), key=lambda item: to_float(item[1]), reverse=True):
-        numeric = round(to_float(value), 2)
-        tone = "bad" if numeric <= 0 else "warn" if numeric < 1.0 else "good"
-        stock_rows.append({"label": key, "value": numeric, "unit": "kg", "tone": tone})
+    for key in sorted(
+        known_coatings,
+        key=lambda item: (
+            -round(to_float((stock_map or {}).get(item)) + type_counts.get(item, 0.0), 2),
+            item.lower(),
+        ),
+    ):
+        warehouse_kg = round(to_float((stock_map or {}).get(key)), 2)
+        loaded_kg = round(type_counts.get(key, 0.0), 2)
+        total_kg = round(warehouse_kg + loaded_kg, 2)
+        min_stock_kg = round(
+            to_float((inventory_meta.get(key) or {}).get("min_stock_kg", DEFAULT_COATING_MIN_STOCK_KG)),
+            2,
+        )
+        tone = "bad" if total_kg <= 0 or total_kg < min_stock_kg else "good"
+        stock_rows.append(
+            {
+                "label": key,
+                "value": total_kg,
+                "unit": "kg",
+                "tone": tone,
+                "warehouse_kg": warehouse_kg,
+                "loaded_kg": loaded_kg,
+                "min_stock_kg": min_stock_kg,
+            }
+        )
     dies_rows = []
     for station, values in (dies_map or {}).items():
         values = values if isinstance(values, dict) else {}
         dies_rows.append(
             {
                 "station": station,
+                "station_key": station,
                 "entry_die_um": to_float(values.get("entry_die_um")),
                 "primary_die_um": to_float(values.get("primary_die_um")),
                 "primary_on_tower": bool(values.get("primary_on_tower")),
@@ -2954,10 +5976,16 @@ def summarize_consumables() -> dict:
             }
         )
     coating_rows = []
-    coating_definitions = coating_config.get("coatings", {}) if isinstance(coating_config, dict) else {}
-    for label, config in sorted((coating_definitions or {}).items()):
+    for label in known_coatings:
+        config = (coating_definitions or {}).get(label, {})
         config = config if isinstance(config, dict) else {}
-        stock_kg = round(to_float((stock_map or {}).get(label)), 2)
+        warehouse_kg = round(to_float((stock_map or {}).get(label)), 2)
+        loaded_kg = round(type_counts.get(label, 0.0), 2)
+        total_kg = round(warehouse_kg + loaded_kg, 2)
+        min_stock_kg = round(
+            to_float((inventory_meta.get(label) or {}).get("min_stock_kg", DEFAULT_COATING_MIN_STOCK_KG)),
+            2,
+        )
         coating_rows.append(
             {
                 "label": label,
@@ -2965,22 +5993,60 @@ def summarize_consumables() -> dict:
                 "density": config.get("Density", ""),
                 "viscosity": config.get("Viscosity", ""),
                 "refractive_index": config.get("Refractive Index", ""),
-                "stock_kg": stock_kg,
-                "tone": "bad" if stock_kg <= 0 else "warn" if stock_kg < 1.0 else "good",
+                "stock_kg": total_kg,
+                "warehouse_kg": warehouse_kg,
+                "loaded_kg": loaded_kg,
+                "min_stock_kg": min_stock_kg,
+                "in_config": label in coating_definitions,
+                "tone": "bad" if total_kg <= 0 or total_kg < min_stock_kg else "good",
             }
         )
     argon_series = [{"label": row.get("month", ""), "value": round(to_float(row.get("total_standard_liters")), 2)} for row in argon_rows[-8:]]
-    low_stock_lines = sum(1 for row in stock_rows if row["value"] < 1.0)
+    low_stock_lines = sum(1 for row in stock_rows if row["value"] < row["min_stock_kg"])
     return {
         "metrics": [
             {"label": "Low containers", "value": low_count, "tone": "warn" if low_count else "good"},
-            {"label": "Low stock lines", "value": low_stock_lines, "tone": "bad" if low_stock_lines else "good"},
+            {"label": "Low inventory lines", "value": low_stock_lines, "tone": "bad" if low_stock_lines else "good"},
             {"label": "Loaded coatings", "value": len([key for key in type_counts if key]), "tone": "info"},
             {"label": "Die stations", "value": len(dies_rows), "tone": "neutral"},
         ],
         "containers": container_cards,
+        "container_editor_rows": [
+            {
+                "label": row["label"],
+                "type": row["type"],
+                "sensor_column": row["sensor_column"],
+                "diameter_mm": row["diameter_mm"],
+                "fill_height_mm": row["fill_height_mm"],
+                "fill_percent": row["fill_percent"],
+                "volume_l": row["volume_l"],
+                "level_kg": row["level"],
+                "updated_at": row["updated_at"],
+            }
+            for row in container_cards
+        ],
+        "container_shared_diameter_mm": round(
+            to_float(container_cards[0]["diameter_mm"]) if container_cards else DEFAULT_CONTAINER_DIAMETER_MM,
+            2,
+        ),
+        "container_sensor_options": list(CONTAINER_SENSOR_OPTIONS),
+        "coating_type_options": known_coatings,
         "stock_rows": stock_rows,
+        "stock_editor_rows": [
+            {
+                "label": row["label"],
+                "value": row["warehouse_kg"],
+                "unit": row["unit"],
+                "tone": row["tone"],
+                "loaded_kg": row["loaded_kg"],
+                "total_kg": row["value"],
+                "min_stock_kg": row["min_stock_kg"],
+                "in_config": row["label"] in coating_definitions,
+            }
+            for row in stock_rows
+        ],
         "stock_by_type": [{"label": key, "value": round(value, 2)} for key, value in type_counts.items()],
+        "container_logger": container_logger_status,
         "temp_rows": temp_holders,
         "temp_holders": temp_holders,
         "temp_stations": temp_stations,
@@ -2989,7 +6055,131 @@ def summarize_consumables() -> dict:
         "coating_rows": coating_rows,
         "argon_rows": argon_rows[-12:],
         "argon_series": argon_series,
+        "container_refill_events": container_refill_events,
     }
+
+
+def save_consumables_containers_action(payload: dict) -> JsonResponse:
+    rows = payload.get("rows") or []
+    if not isinstance(rows, list) or not rows:
+        return JsonResponse({"ok": False, "message": "No container rows were supplied."}, 400)
+
+    next_config = normalize_container_config(read_json_dict(CONTAINER_CONFIG))
+    shared_diameter_mm = round(to_float(payload.get("shared_diameter_mm", DEFAULT_CONTAINER_DIAMETER_MM)), 2)
+    if shared_diameter_mm <= 0:
+        shared_diameter_mm = DEFAULT_CONTAINER_DIAMETER_MM
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label", "")).strip().upper()
+        if label not in {"A", "B", "C", "D"}:
+            continue
+        current = dict(next_config.get(label, {}))
+        fill_height_mm = round(
+            to_float(item.get("fill_height_mm", current.get("fill_height_mm", DEFAULT_CONTAINER_FILL_HEIGHT_MM))),
+            2,
+        )
+        current["type"] = str(item.get("type", current.get("type", ""))).strip()
+        current["sensor_column"] = normalize_container_sensor_column(item.get("sensor_column", current.get("sensor_column")), label)
+        current["diameter_mm"] = shared_diameter_mm
+        current["fill_height_mm"] = fill_height_mm if fill_height_mm > 0 else DEFAULT_CONTAINER_FILL_HEIGHT_MM
+        next_config[label] = current
+
+    write_json_value(CONTAINER_CONFIG, next_config)
+    return JsonResponse({"ok": True, "message": "Container live-fill setup saved.", "bootstrap": build_bootstrap_payload().body})
+
+
+def save_consumables_stock_action(payload: dict) -> JsonResponse:
+    stock_map = read_json_value(COATING_STOCK, {})
+    inventory_meta = read_consumables_inventory_meta()
+    rows = payload.get("rows") or []
+    if not isinstance(rows, list):
+        return JsonResponse({"ok": False, "message": "No stock rows were supplied."}, 400)
+    next_map: dict[str, float] = {}
+    next_meta: dict[str, dict[str, float]] = {}
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label", "")).strip()
+        if not label:
+            continue
+        remove = str(item.get("remove", "")).strip().lower() in {"1", "true", "yes", "on"}
+        min_stock_kg = round(to_float(item.get("min_stock_kg", DEFAULT_COATING_MIN_STOCK_KG)), 2)
+        if not remove:
+            next_map[label] = round(to_float(item.get("value")), 2)
+            next_meta[label] = {"min_stock_kg": min_stock_kg}
+    custom = payload.get("custom") or {}
+    if isinstance(custom, dict):
+        label = str(custom.get("label", "")).strip()
+        if label:
+            next_map[label] = round(to_float(custom.get("value")), 2)
+            next_meta[label] = {
+                "min_stock_kg": round(to_float(custom.get("min_stock_kg", DEFAULT_COATING_MIN_STOCK_KG)), 2),
+            }
+    write_json_value(COATING_STOCK, next_map)
+    write_json_value(COATING_INVENTORY_META, next_meta)
+    return JsonResponse({"ok": True, "message": "Coating stock saved.", "bootstrap": build_bootstrap_payload().body})
+
+
+def save_consumables_coatings_action(payload: dict) -> JsonResponse:
+    rows = payload.get("rows") or []
+    if not isinstance(rows, list) or not rows:
+        return JsonResponse({"ok": False, "message": "No coating rows were supplied."}, 400)
+
+    config_root = read_json_value(COATING_CONFIG, {})
+    if not isinstance(config_root, dict):
+        config_root = {}
+
+    existing_coatings = config_root.get("coatings", {})
+    coatings = dict(existing_coatings) if isinstance(existing_coatings, dict) else {}
+
+    def normalize_optional_number(value):
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except (TypeError, ValueError):
+            return text
+
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label", "")).strip()
+        if not label:
+            continue
+        current_entry = coatings.get(label, {})
+        next_entry = dict(current_entry) if isinstance(current_entry, dict) else {}
+
+        description = str(item.get("description", "")).strip()
+        if description:
+            next_entry["Description"] = description
+        else:
+            next_entry.pop("Description", None)
+
+        density = normalize_optional_number(item.get("density", ""))
+        if density is None:
+            next_entry.pop("Density", None)
+        else:
+            next_entry["Density"] = density
+
+        viscosity = normalize_optional_number(item.get("viscosity", ""))
+        if viscosity is None:
+            next_entry.pop("Viscosity", None)
+        else:
+            next_entry["Viscosity"] = viscosity
+
+        refractive_index = normalize_optional_number(item.get("refractive_index", ""))
+        if refractive_index is None:
+            next_entry.pop("Refractive Index", None)
+        else:
+            next_entry["Refractive Index"] = refractive_index
+
+        coatings[label] = next_entry
+
+    config_root["coatings"] = coatings
+    write_json_value(COATING_CONFIG, config_root)
+    return JsonResponse({"ok": True, "message": "Coating guide saved.", "bootstrap": build_bootstrap_payload().body})
 
 
 def save_consumables_dies_action(payload: dict) -> JsonResponse:
@@ -2999,19 +6189,23 @@ def save_consumables_dies_action(payload: dict) -> JsonResponse:
         return JsonResponse({"ok": False, "message": "No die station values were supplied."}, 400)
     if not isinstance(dies_map, dict):
         dies_map = {}
+    next_dies_map: dict[str, dict] = {}
     for item in stations:
         if not isinstance(item, dict):
             continue
         station = str(item.get("station", "")).strip()
+        original_station = str(item.get("original_station", "")).strip()
         if not station:
-            continue
-        current = dies_map.get(station, {})
+            return JsonResponse({"ok": False, "message": "Every die row needs a station name."}, 400)
+        if station in next_dies_map:
+            return JsonResponse({"ok": False, "message": f"Duplicate die station name: {station}."}, 400)
+        current = dies_map.get(original_station or station, {})
         if not isinstance(current, dict):
             current = {}
         current["entry_die_um"] = to_float(item.get("entry_die_um"))
         current["primary_die_um"] = to_float(item.get("primary_die_um"))
-        dies_map[station] = current
-    DIES_CONFIG.write_text(json.dumps(dies_map, indent=2), encoding="utf-8")
+        next_dies_map[station] = current
+    write_json_value(DIES_CONFIG, next_dies_map)
     return JsonResponse({"ok": True, "message": "Die setup saved.", "bootstrap": build_bootstrap_payload().body})
 
 
@@ -3092,7 +6286,7 @@ def summarize_process_setup() -> dict:
                 "tension": template.get("Tension (g)", ""),
             }
         )
-    dataset_files = list_csv_files(DATASET_DIR)
+    dataset_files = list_dataset_csv_files()
     if selected_csv and not any(path.name == selected_csv for path in dataset_files):
         selected_csv = ""
     selected_csv = selected_csv or (dataset_files[0].name if dataset_files else "")
@@ -3194,25 +6388,26 @@ def summarize_process_setup() -> dict:
 
 
 def next_process_setup_index(preform_number: str) -> int:
-    preform_number = str(preform_number or "").strip()
-    if not preform_number:
+    raw_value = normalize_preform_token(preform_number)
+    if not raw_value:
         return 1
-    pattern = f"{preform_number}F_"
+    identity = parse_draw_dataset_identity(Path(raw_value).stem)
+    preform_key = str(identity["preform"]) if identity else raw_value
     max_index = 0
-    for path in list_csv_files(DATASET_DIR):
-        name = path.stem
-        if not name.startswith(pattern):
-            continue
-        tail = name[len(pattern):]
-        if tail.isdigit():
-            max_index = max(max_index, int(tail))
+    for path in list_dataset_csv_files():
+        identity = parse_draw_dataset_identity(path.stem)
+        if identity and str(identity["preform"]) == preform_key:
+            max_index = max(max_index, int(identity["index"]))
     return max_index + 1
 
 
 def process_setup_dataset_name(preform_number: str) -> str:
-    preform = str(preform_number or "").strip()
+    preform = normalize_preform_token(Path(str(preform_number or "").strip()).stem)
     if preform:
-        return f"{preform}F_{next_process_setup_index(preform)}.csv"
+        identity = parse_draw_dataset_identity(preform)
+        if identity:
+            return f"{identity['draw_stem']}.csv"
+        return f"{preform}F{next_process_setup_index(preform)}.csv"
     return f"draw_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
 
@@ -3234,6 +6429,7 @@ def process_setup_order_rows(row: dict[str, object], order_index: int | None, cs
     add_row("Priority", row.get("Priority", "Normal"))
     add_row("Order Opener", row.get("Order Opener", ""))
     add_row("Fiber Geometry Type", row.get(GEOMETRY_COL, ""))
+    add_row("Preform Diameter (mm)", row.get(PREFORM_DIAMETER_COL, ""), "mm")
     add_row("Tiger Cut (%)", row.get(TIGER_CUT_COL, ""), "%")
     add_row("Octagonal F2F (mm)", row.get(OCT_F2F_COL, ""), "mm")
     add_row("Required Length (m) (for T&M+costumer)", row.get(LENGTH_COL, ""), "m")
@@ -3246,6 +6442,7 @@ def process_setup_order_rows(row: dict[str, object], order_index: int | None, cs
     add_row("Secondary Coating Diameter Tol (± µm)", row.get(SECONDARY_TOL_COL, ""), "µm")
     add_row("Tension (g)", row.get("Tension (g)", ""), "g")
     add_row("Draw Speed (m/min)", row.get("Draw Speed (m/min)", ""), "m/min")
+    add_row("Furnace Temperature (°C)", row.get(FURNACE_TEMP_COL, ""), "°C")
     add_row("Main Coating", row.get("Main Coating", ""))
     add_row("Secondary Coating", row.get("Secondary Coating", ""))
     add_row("Main Coating Temperature (°C)", row.get(MAIN_TEMP_COL, ""), "°C")
@@ -3256,7 +6453,7 @@ def process_setup_order_rows(row: dict[str, object], order_index: int | None, cs
 
 
 def write_selected_dataset_csv(csv_name: str) -> None:
-    SELECTED_CSV_JSON.write_text(json.dumps({"selected_csv": os.path.basename(str(csv_name or "").strip())}, indent=2), encoding="utf-8")
+    write_json_value(SELECTED_CSV_JSON, {"selected_csv": os.path.basename(str(csv_name or "").strip())})
 
 
 def create_process_setup_manual_action(payload: dict) -> JsonResponse:
@@ -3264,7 +6461,7 @@ def create_process_setup_manual_action(payload: dict) -> JsonResponse:
     csv_name = os.path.basename(str(payload.get("csvName", "")).strip() or process_setup_dataset_name(preform_number))
     if not csv_name.lower().endswith(".csv"):
         csv_name = f"{csv_name}.csv"
-    csv_path = DATASET_DIR / csv_name
+    csv_path = full_dataset_target_path(csv_name)
     if csv_path.exists():
         return JsonResponse({"ok": False, "message": f"Dataset CSV already exists: {csv_name}"}, 400)
 
@@ -3284,7 +6481,7 @@ def create_process_setup_manual_action(payload: dict) -> JsonResponse:
 
 
 def create_process_setup_scheduled_action(payload: dict) -> JsonResponse:
-    order_index = int(to_float(payload.get("orderIndex"), -1))
+    order_index = to_int(payload.get("orderIndex"), -1)
     rows = read_csv_rows(DRAW_ORDERS)
     if order_index < 0 or order_index >= len(rows):
         return JsonResponse({"ok": False, "message": "Scheduled order was not found."}, 404)
@@ -3300,7 +6497,7 @@ def create_process_setup_scheduled_action(payload: dict) -> JsonResponse:
     csv_name = os.path.basename(str(payload.get("csvName", "")).strip() or process_setup_dataset_name(preform_number))
     if not csv_name.lower().endswith(".csv"):
         csv_name = f"{csv_name}.csv"
-    csv_path = DATASET_DIR / csv_name
+    csv_path = full_dataset_target_path(csv_name)
     if csv_path.exists():
         return JsonResponse({"ok": False, "message": f"Dataset CSV already exists: {csv_name}"}, 400)
 
@@ -3317,7 +6514,7 @@ def create_process_setup_scheduled_action(payload: dict) -> JsonResponse:
 
 def select_process_setup_dataset_action(payload: dict) -> JsonResponse:
     selected_csv = os.path.basename(str(payload.get("selectedCsv", "")).strip())
-    if selected_csv and not (DATASET_DIR / selected_csv).exists():
+    if selected_csv and not resolve_dataset_csv_path(selected_csv):
         return JsonResponse({"ok": False, "message": "Selected dataset CSV was not found."}, 404)
     write_selected_dataset_csv(selected_csv)
     return JsonResponse({"ok": True, "message": "Process Setup dataset changed.", "bootstrap": build_bootstrap_payload().body})
@@ -3357,6 +6554,7 @@ def build_process_setup_save_rows(payload: dict) -> list[dict[str, object]]:
     add("Iris Gap Area", iris.get("gap_area_mm2"), "mm^2")
 
     add("Entry Fiber Diameter", coating.get("entry_fiber_diameter_um"), "µm")
+    add("Furnace Temperature", coating.get("furnace_temp_c"), "°C")
     add("Target First Coating Diameter", coating.get("target_first_coating_diameter_um"), "µm")
     add("Target Second Coating Diameter", coating.get("target_second_coating_diameter_um"), "µm")
     add("Primary Coating", coating.get("primary_coating"))
@@ -3366,6 +6564,10 @@ def build_process_setup_save_rows(payload: dict) -> list[dict[str, object]]:
     add("Primary Die Name", coating.get("primary_die"))
     add("Secondary Die Name", coating.get("secondary_die"))
     add("Coating Die Selection Mode", coating.get("die_mode"))
+    add("First Coating Diameter (Theoretical)", coating.get("predicted_first_coating_diameter_um"), "µm")
+    add("Second Coating Diameter (Theoretical)", coating.get("predicted_second_coating_diameter_um"), "µm")
+    add("Ideal Primary Die (µm)", coating.get("ideal_primary_die_um"), "µm")
+    add("Ideal Secondary Die (µm)", coating.get("ideal_secondary_die_um"), "µm")
     add("Draw Speed", coating.get("draw_speed_m_min"), "m/min")
 
     add("P Gain (Diameter Control)", pid.get("p_gain"))
@@ -3405,8 +6607,23 @@ def find_order_index_by_dataset(dataset_name: str) -> int | None:
     return None
 
 
+def list_in_progress_draw_finalize_datasets() -> list[Path]:
+    dataset_files = list_dataset_csv_files()
+    if not dataset_files:
+        return []
+    active_names: set[str] = set()
+    for row in read_csv_rows(DRAW_ORDERS):
+        if str(row.get("Status", "")).strip() != "In Progress":
+            continue
+        for key in ("Active CSV", "Assigned Dataset CSV"):
+            dataset_name = os.path.basename(str(row.get(key, "")).strip())
+            if dataset_name:
+                active_names.add(dataset_name)
+    return [path for path in dataset_files if path.name in active_names]
+
+
 def summarize_draw_finalize(selected_csv_override: str | None = None) -> dict:
-    dataset_files = list_csv_files(DATASET_DIR)
+    dataset_files = list_in_progress_draw_finalize_datasets()
     latest_dataset = dataset_files[0].name if dataset_files else ""
     selected_csv = latest_dataset
     if selected_csv_override:
@@ -3426,13 +6643,14 @@ def summarize_draw_finalize(selected_csv_override: str | None = None) -> dict:
         "matched_order": matched_order,
         "components": components,
         "recent_faults": fault_rows[-8:],
+        "active_only": True,
     }
 
 
 def read_development_tables() -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
-    projects = read_csv_rows(DATA_DIR / "development_projects.csv")
-    experiments = read_csv_rows(DATA_DIR / "development_experiments.csv")
-    updates = read_csv_rows(DATA_DIR / "experiment_updates.csv")
+    projects = read_csv_rows(DEVELOPMENT_PROJECTS)
+    experiments = read_csv_rows(DEVELOPMENT_EXPERIMENTS)
+    updates = read_csv_rows(EXPERIMENT_UPDATES)
     return projects, experiments, updates
 
 
@@ -3450,7 +6668,7 @@ DEVELOPMENT_PROJECT_FIELDS = [
 
 
 def development_project_fieldnames() -> list[str]:
-    fieldnames = read_csv_fieldnames(DATA_DIR / "development_projects.csv") or []
+    fieldnames = read_csv_fieldnames(DEVELOPMENT_PROJECTS) or []
     if not fieldnames:
         fieldnames = DEVELOPMENT_PROJECT_FIELDS[:]
     else:
@@ -3563,7 +6781,7 @@ def summarize_development_project(project_name: str) -> dict:
         "researchers": researchers,
         "experiments": project_experiments[:18],
         "updates": project_updates[:18],
-        "dataset_files": [path.name for path in list_csv_files(DATASET_DIR)[:40]],
+        "dataset_files": [path.name for path in list_dataset_csv_files()[:40]],
     }
 
 
@@ -4141,15 +7359,14 @@ def build_development_report_html(project_name: str) -> str:
 def summarize_report_center() -> dict:
     ensure_report_center_dir()
     projects, experiments, updates = read_development_tables()
-    pdf_exports = list_recent_files(REPORT_CENTER_DIR, suffixes=(".pdf",), limit=20)
     md_exports = list_recent_files(REPORT_CENTER_DIR, suffixes=(".md",), limit=20)
     project_names = dedupe_strings([row.get("Project Name", "") for row in projects if row.get("Project Name", "")])
     return {
         "metrics": [
-            {"label": "Operations exports", "value": len(pdf_exports)},
-            {"label": "Markdown exports", "value": len(md_exports)},
+            {"label": "Report exports", "value": len(md_exports)},
             {"label": "Dev projects", "value": len(project_names)},
             {"label": "Experiments", "value": len(experiments)},
+            {"label": "Updates", "value": len(updates)},
         ],
         "modes": ["Operations Report", "Development Process", "Recent Exports"],
         "sections": REPORT_CENTER_SECTIONS,
@@ -4157,9 +7374,8 @@ def summarize_report_center() -> dict:
         "projects_count": len(project_names),
         "experiments_count": len(experiments),
         "updates_count": len(updates),
-        "recent_pdf_exports": pdf_exports,
         "recent_md_exports": md_exports,
-        "latest_export": (pdf_exports + md_exports)[0] if (pdf_exports or md_exports) else {},
+        "latest_export": md_exports[0] if md_exports else {},
         "default_project": project_names[0] if project_names else "",
     }
 
@@ -4168,8 +7384,8 @@ def normalize_dataset_rows(rows: list[dict[str, str]]) -> list[dict[str, object]
     current_section = "General"
     normalized = []
     for index, row in enumerate(rows):
-        parameter_name = str(row.get("Parameter Name", "")).strip()
-        value = str(row.get("Value", "")).strip()
+        parameter_name = normalize_dataset_parameter_name(row.get("Parameter Name", ""))
+        value = normalize_dataset_parameter_value(parameter_name, row.get("Value", ""))
         units = str(row.get("Units", "")).strip()
         if parameter_name.startswith("===") and parameter_name.endswith("==="):
             current_section = parameter_name.strip("= ").title()
@@ -4230,7 +7446,7 @@ def infer_dataset_event_ts(normalized_rows: list[dict[str, object]], path: Path)
 
 
 def load_dataset_scope_records(dataset_name: str | None = None) -> tuple[list[Path], list[dict[str, object]]]:
-    files = list_csv_files(DATASET_DIR)
+    files = list_dataset_csv_files()
     selected_name = str(dataset_name or "").strip()
     if selected_name and selected_name != "__ALL__":
         files = [path for path in files if path.name == selected_name]
@@ -4253,7 +7469,7 @@ def load_dataset_scope_records(dataset_name: str | None = None) -> tuple[list[Pa
 
 def load_dataset_records_for_filenames(file_names: list[str] | None = None) -> tuple[list[Path], list[dict[str, object]]]:
     requested = {str(name or "").strip() for name in (file_names or []) if str(name or "").strip()}
-    files = list_csv_files(DATASET_DIR)
+    files = list_dataset_csv_files()
     if requested:
         files = [path for path in files if path.name in requested]
     records: list[dict[str, object]] = []
@@ -4332,7 +7548,7 @@ def analyze_dataset_file(dataset_name: str | None = None) -> dict:
 
 
 def summarize_sql_lab() -> dict:
-    dataset_files = list_csv_files(DATASET_DIR)
+    dataset_files = list_dataset_csv_files()
     latest_payload = analyze_dataset_file("__ALL__") if dataset_files else {}
     components = collect_sql_lab_components()
     return {
@@ -4417,7 +7633,13 @@ def sql_eval_group_condition(draw_rows: list[dict[str, object]], condition: dict
     return outcome
 
 
-def sql_filter_dataset_records(payload: dict) -> dict:
+def sql_filter_dataset_records(
+    payload: dict,
+    *,
+    draw_limit: int | None = 200,
+    value_limit: int | None = 400,
+    event_limit: int | None = 120,
+) -> dict:
     dataset_name = str(payload.get("dataset", "__ALL__")).strip() or "__ALL__"
     _, records = load_dataset_scope_records(dataset_name)
     by_draw: dict[str, list[dict[str, object]]] = {}
@@ -4482,7 +7704,8 @@ def sql_filter_dataset_records(payload: dict) -> dict:
 
     matched_draws.sort(key=lambda item: (item["event_ts"], item["_draw"]))
     matched_draw_ids = {item["_draw"] for item in matched_draws}
-    matched_values = matched_values[:400]
+    if value_limit is not None:
+        matched_values = matched_values[:value_limit]
 
     scope_start = None
     scope_end = None
@@ -4569,10 +7792,10 @@ def sql_filter_dataset_records(payload: dict) -> dict:
             "fault_events": len(fault_rows),
             "draw_scope": len(matched_draw_ids),
         },
-        "matched_draws": matched_draws[:200] if include_draws else [],
+        "matched_draws": matched_draws[:draw_limit] if include_draws and draw_limit is not None else (matched_draws if include_draws else []),
         "matched_values": matched_values,
-        "maintenance_events": maintenance_rows[:120],
-        "fault_events": fault_rows[:120],
+        "maintenance_events": maintenance_rows[:event_limit] if event_limit is not None else maintenance_rows,
+        "fault_events": fault_rows[:event_limit] if event_limit is not None else fault_rows,
     }
 
 
@@ -4581,6 +7804,198 @@ def run_sql_lab_filter_action(payload: dict) -> JsonResponse:
         return JsonResponse(sql_filter_dataset_records(payload))
     except Exception as exc:
         return JsonResponse({"ok": False, "message": str(exc)}, 400)
+
+
+def sql_collect_condition_parameter_names(payload: dict) -> list[str]:
+    names: list[str] = []
+    for condition in (payload.get("conditions") or []):
+        for raw_name in (condition.get("params") or []):
+            name = str(raw_name or "").strip()
+            if name:
+                names.append(name)
+    return dedupe_strings(names)
+
+
+def sql_condition_operator_label_server(operator: str) -> str:
+    op = str(operator or "any").strip().lower()
+    mapping = {
+        "any": "Any value",
+        "=": "=",
+        "!=": "!=",
+        ">": ">",
+        ">=": ">=",
+        "<": "<",
+        "<=": "<=",
+        "between": "between",
+        "contains": "contains",
+    }
+    return mapping.get(op, op or "any")
+
+
+def sql_describe_filter_conditions(payload: dict) -> list[str]:
+    lines: list[str] = []
+    for index, condition in enumerate(payload.get("conditions") or []):
+        params = dedupe_strings(condition.get("params") or [])
+        params_label = ", ".join(params[:4]) if params else "No parameters"
+        if len(params) > 4:
+            params_label = f"{params_label} +{len(params) - 4} more"
+        op = sql_condition_operator_label_server(str(condition.get("op", "any")))
+        v1 = str(condition.get("v1", "")).strip()
+        v2 = str(condition.get("v2", "")).strip()
+        value_label = ""
+        if op == "between":
+            value_label = f" {v1 or '?'} .. {v2 or '?'}"
+        elif op not in {"Any value"} and v1:
+            value_label = f" {v1}"
+        negate_label = " · NOT" if condition.get("negate") else ""
+        group_logic = str(condition.get("groupLogic", "ANY (OR)")).strip() or "ANY (OR)"
+        joiner = "BASE" if index == 0 else str(condition.get("joiner", "AND")).strip().upper()
+        lines.append(f"{joiner} · {group_logic} · {params_label} · {op}{value_label}{negate_label}")
+    return lines
+
+
+def build_sql_lab_export_context(payload: dict) -> dict:
+    filter_result = sql_filter_dataset_records(payload, draw_limit=None, value_limit=None, event_limit=None)
+    matched_draws = list(filter_result.get("matched_draws") or [])
+    filenames = dedupe_strings([str(item.get("filename", "")).strip() for item in matched_draws if str(item.get("filename", "")).strip()])
+    _, scope_records = load_dataset_records_for_filenames(filenames)
+    rows_by_draw: dict[str, list[dict[str, object]]] = {}
+    for row in scope_records:
+        draw_id = str(row.get("_draw", "")).strip()
+        if not draw_id:
+            continue
+        rows_by_draw.setdefault(draw_id, []).append(row)
+
+    parameter_names = sql_collect_condition_parameter_names(payload)
+    if not parameter_names:
+        parameter_names = dedupe_strings(
+            [
+                str(item.get("parameter_name", "")).strip()
+                for item in (filter_result.get("matched_values") or [])
+                if str(item.get("parameter_name", "")).strip()
+            ]
+        )[:24]
+
+    draw_details: list[dict[str, object]] = []
+    for draw_meta in matched_draws:
+        draw_id = str(draw_meta.get("_draw", "")).strip()
+        draw_rows = rows_by_draw.get(draw_id, [])
+        parameter_rows: list[dict[str, str]] = []
+        if parameter_names:
+            for parameter_name in parameter_names:
+                matching_rows = [row for row in draw_rows if str(row.get("parameter_name", "")).strip() == parameter_name]
+                if not matching_rows:
+                    parameter_rows.append(
+                        {
+                            "parameter_name": parameter_name,
+                            "value": "—",
+                            "units": "",
+                            "section": "",
+                            "group_name": "",
+                        }
+                    )
+                    continue
+                for row in matching_rows[:3]:
+                    parameter_rows.append(
+                        {
+                            "parameter_name": parameter_name,
+                            "value": str(row.get("value", "")).strip() or "—",
+                            "units": str(row.get("units", "")).strip(),
+                            "section": str(row.get("section", "")).strip(),
+                            "group_name": str(row.get("group_name", "")).strip(),
+                        }
+                    )
+        draw_details.append(
+            {
+                "draw": draw_id,
+                "event_ts": str(draw_meta.get("event_ts", "")).strip(),
+                "filename": str(draw_meta.get("filename", "")).strip(),
+                "parameter_rows": parameter_rows,
+            }
+        )
+
+    active_lanes = []
+    if payload.get("includeDraws", True):
+        active_lanes.append("Draws")
+    if payload.get("includeMaintenance"):
+        active_lanes.append("Maintenance")
+    if payload.get("includeFaults"):
+        active_lanes.append("Faults")
+
+    return {
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "dataset": str(payload.get("dataset", "__ALL__")).strip() or "__ALL__",
+        "summary": filter_result.get("summary") or {},
+        "conditions": sql_describe_filter_conditions(payload),
+        "parameter_names": parameter_names,
+        "time_enabled": bool(payload.get("timeEnabled")),
+        "time_from": str(payload.get("timeFrom", "")).strip(),
+        "time_to": str(payload.get("timeTo", "")).strip(),
+        "event_scope": str(payload.get("eventScope", "Only within matched draws window")).strip(),
+        "active_lanes": active_lanes,
+        "draw_details": draw_details,
+        "maintenance_events": filter_result.get("maintenance_events") or [],
+        "fault_events": filter_result.get("fault_events") or [],
+    }
+
+
+def create_sql_lab_results_export_action(payload: dict) -> JsonResponse:
+    ensure_report_center_dir()
+    export_context = build_sql_lab_export_context(payload)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dataset_label = str(export_context.get("dataset", "__ALL__")).strip() or "__ALL__"
+    safe_dataset = re.sub(r"[^A-Za-z0-9._-]+", "_", dataset_label).strip("._") or "all"
+    output_name = f"sql_lab_matched_results_{safe_dataset}_{timestamp}.csv"
+    output_path = REPORT_CENTER_DIR / output_name
+    parameter_names = list(export_context.get("parameter_names") or [])
+    draw_details = list(export_context.get("draw_details") or [])
+    parameter_unit_map: dict[str, str] = {}
+    for item in draw_details:
+        for row in (item.get("parameter_rows") or []):
+            parameter_name = str(row.get("parameter_name", "")).strip()
+            units = str(row.get("units", "")).strip()
+            if parameter_name and units and parameter_name not in parameter_unit_map:
+                parameter_unit_map[parameter_name] = units
+    headers = ["draw", "event_ts", "filename"]
+    for parameter_name in parameter_names:
+        units = parameter_unit_map.get(parameter_name, "")
+        headers.append(f"{parameter_name} ({units})" if units else parameter_name)
+    try:
+        with output_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(headers)
+            for item in draw_details:
+                parameter_value_map: dict[str, list[str]] = {}
+                for row in (item.get("parameter_rows") or []):
+                    parameter_name = str(row.get("parameter_name", "")).strip()
+                    if not parameter_name:
+                        continue
+                    value = str(row.get("value", "")).strip() or "—"
+                    parameter_value_map.setdefault(parameter_name, []).append(value)
+                writer.writerow(
+                    [
+                        str(item.get("draw", "")).strip(),
+                        str(item.get("event_ts", "")).strip(),
+                        str(item.get("filename", "")).strip(),
+                        *[" | ".join(parameter_value_map.get(name, ["—"])) for name in parameter_names],
+                    ]
+                )
+    except OSError as exc:
+        return JsonResponse({"ok": False, "message": f"Could not write matched results CSV: {exc}"}, 500)
+    encoded_name = quote(output_path.name)
+    return JsonResponse(
+        {
+            "ok": True,
+            "message": f"Matched results CSV saved as {output_path.name}.",
+            "fileName": output_path.name,
+            "fileUrl": f"/api/report-center/file?name={encoded_name}&download=1",
+            "viewUrl": f"/api/report-center/file?name={encoded_name}&mode=inline",
+            "downloadUrl": f"/api/report-center/file?name={encoded_name}&download=1",
+            "format": "csv",
+            "matchedDraws": int((export_context.get("summary") or {}).get("matched_draws", 0)),
+            "conditionParams": len(parameter_names),
+        }
+    )
 
 
 def run_sql_lab_analysis_scope_action(payload: dict) -> JsonResponse:
@@ -4629,7 +8044,7 @@ def summarize_development() -> dict:
         "archived_project_names": [row.get("Project Name", "") for row in archived_projects if row.get("Project Name", "")],
         "default_project": project_names[0] if project_names else "",
         "latest_updates": latest_updates,
-        "dataset_files": [path.name for path in list_csv_files(DATASET_DIR)[:60]],
+        "dataset_files": [path.name for path in list_dataset_csv_files()[:60]],
     }
 
 
@@ -4738,6 +8153,10 @@ def validate_order_payload(order: dict) -> list[str]:
         errors.append("Tiger Cut (%)")
     if geometry == "Octagonal" and to_float(order.get("octF2f")) <= 0:
         errors.append("Octagonal F2F (mm)")
+    if to_float(order.get("preformDiameterMm")) <= 0:
+        errors.append("Preform Diameter (mm)")
+    if to_float(order.get("furnaceTemp")) <= 0:
+        errors.append("Furnace Temperature (°C)")
     return errors
 
 
@@ -4786,14 +8205,16 @@ def create_order_draw_action(payload: dict) -> JsonResponse:
         "Secondary Coating Diameter (µm)": to_float(order.get("secondaryCoatingDiameter")),
         "Tension (g)": to_float(order.get("tension")),
         "Draw Speed (m/min)": to_float(order.get("drawSpeed")),
+        FURNACE_TEMP_COL: to_float(order.get("furnaceTemp")),
         LENGTH_COL: to_float(order.get("requiredLength")),
         GOOD_ZONES_COL: int(to_float(order.get("goodZones") or 0)),
         "Main Coating": str(order.get("mainCoating", "")).strip(),
         "Secondary Coating": str(order.get("secondaryCoating", "")).strip(),
         "Notes": str(order.get("notes", "")).strip(),
-        "Desired Date": str(order.get("desiredDate", "")).strip(),
+        "Desired Date": "",
         "Next Planned Draw Date": "",
         GEOMETRY_COL: str(order.get("geometry", "")).strip(),
+        PREFORM_DIAMETER_COL: to_float(order.get("preformDiameterMm")),
         TIGER_CUT_COL: to_float(order.get("tigerCut")),
         OCT_F2F_COL: to_float(order.get("octF2f")),
         MAIN_TEMP_COL: to_float(order.get("mainCoatingTemp")),
@@ -4812,6 +8233,7 @@ def create_order_draw_action(payload: dict) -> JsonResponse:
     existing.append({field: new_row.get(field, "") for field in fieldnames})
     order_index = len(existing) - 1
     message = "Draw order saved."
+    sap_message = ""
     if schedule_now:
         schedule_ready = (
             str(schedule_payload.get("password", "")).strip() == SCHEDULE_PASSWORD
@@ -4826,11 +8248,15 @@ def create_order_draw_action(payload: dict) -> JsonResponse:
         else:
             message = "Draw order saved, but not scheduled because the schedule details or password were invalid."
     write_csv_rows(DRAW_ORDERS, existing, fieldnames)
+    if new_row[GEOMETRY_COL] == "PANDA - PM":
+        sap_source_draw = new_row["Preform Number"] or f"{project_name} {new_row['Timestamp']}"
+        _, sap_message = decrement_sap_rods_set_for_panda_draw(sap_source_draw)
     if save_template:
         save_project_template(
             {
                 PROJECTS_COL: project_name,
                 GEOMETRY_COL: new_row[GEOMETRY_COL],
+                PREFORM_DIAMETER_COL: new_row[PREFORM_DIAMETER_COL],
                 TIGER_CUT_COL: new_row[TIGER_CUT_COL],
                 OCT_F2F_COL: new_row[OCT_F2F_COL],
                 "Fiber Diameter (µm)": new_row["Fiber Diameter (µm)"],
@@ -4841,6 +8267,7 @@ def create_order_draw_action(payload: dict) -> JsonResponse:
                 SECONDARY_TOL_COL: new_row[SECONDARY_TOL_COL],
                 "Tension (g)": new_row["Tension (g)"],
                 "Draw Speed (m/min)": new_row["Draw Speed (m/min)"],
+                FURNACE_TEMP_COL: new_row[FURNACE_TEMP_COL],
                 "Main Coating": new_row["Main Coating"],
                 "Secondary Coating": new_row["Secondary Coating"],
                 MAIN_TEMP_COL: new_row[MAIN_TEMP_COL],
@@ -4848,6 +8275,8 @@ def create_order_draw_action(payload: dict) -> JsonResponse:
                 "Notes Default": new_row["Notes"],
             }
         )
+    if sap_message:
+        message = f"{message} {sap_message}".strip()
     return JsonResponse({"ok": True, "message": message, "bootstrap": build_bootstrap_payload().body})
 
 
@@ -4860,6 +8289,7 @@ def save_order_draw_template_action(payload: dict) -> JsonResponse:
         {
             PROJECTS_COL: project_name,
             GEOMETRY_COL: str(payload.get("geometry", "")).strip(),
+            PREFORM_DIAMETER_COL: to_float(payload.get("preformDiameterMm")),
             TIGER_CUT_COL: to_float(payload.get("tigerCut")),
             OCT_F2F_COL: to_float(payload.get("octF2f")),
             "Fiber Diameter (µm)": to_float(payload.get("fiberDiameter")),
@@ -4870,6 +8300,7 @@ def save_order_draw_template_action(payload: dict) -> JsonResponse:
             SECONDARY_TOL_COL: to_float(payload.get("secondaryTol")),
             "Tension (g)": to_float(payload.get("tension")),
             "Draw Speed (m/min)": to_float(payload.get("drawSpeed")),
+            FURNACE_TEMP_COL: to_float(payload.get("furnaceTemp")),
             "Main Coating": str(payload.get("mainCoating", "")).strip(),
             "Secondary Coating": str(payload.get("secondaryCoating", "")).strip(),
             MAIN_TEMP_COL: to_float(payload.get("mainCoatingTemp")),
@@ -4884,7 +8315,7 @@ def schedule_pending_order_action(payload: dict) -> JsonResponse:
     password = str(payload.get("password", "")).strip()
     if password != SCHEDULE_PASSWORD:
         return JsonResponse({"ok": False, "message": "Scheduling password is missing or wrong."}, 400)
-    order_index = int(to_float(payload.get("orderIndex")))
+    order_index = to_int(payload.get("orderIndex"), -1)
     orders = read_csv_rows(DRAW_ORDERS)
     if order_index < 0 or order_index >= len(orders):
         return JsonResponse({"ok": False, "message": "Selected order was not found."}, 404)
@@ -4905,7 +8336,7 @@ def schedule_pending_order_action(payload: dict) -> JsonResponse:
 def append_dataset_rows(selected_csv: str, rows: list[dict]) -> tuple[bool, str]:
     if not selected_csv:
         return False, "No dataset CSV selected."
-    csv_path = DATA_DIR.parent / "data_set_csv" / os.path.basename(selected_csv)
+    csv_path = resolve_dataset_csv_path(selected_csv) or full_dataset_target_path(selected_csv)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     existing = read_csv_rows(csv_path)
     fieldnames = ["Parameter Name", "Value", "Units"]
@@ -4915,6 +8346,302 @@ def append_dataset_rows(selected_csv: str, rows: list[dict]) -> tuple[bool, str]
     normalized_new = [{field: row.get(field, "") for field in fieldnames} for row in rows]
     write_csv_rows(csv_path, normalized_existing + normalized_new, fieldnames)
     return True, f"Saved {len(normalized_new)} rows into {csv_path.name}"
+
+
+def format_done_snapshot_value(value: object, units: object = "") -> str:
+    text = str(value or "").strip()
+    unit_text = str(units or "").strip()
+    if not text:
+        return ""
+    try:
+        number = float(text)
+        if not math.isfinite(number):
+            return f"{text} {unit_text}".strip()
+        if number.is_integer():
+            return f"{int(number)} {unit_text}".strip()
+        return f"{round(number, 3)} {unit_text}".strip()
+    except (TypeError, ValueError):
+        return f"{text} {unit_text}".strip()
+
+
+def latest_dataset_parameter_value(rows: list[dict[str, str]], name: str) -> str:
+    for row in reversed(rows):
+        if str(row.get("Parameter Name", "")).strip() != name:
+            continue
+        return format_done_snapshot_value(row.get("Value", ""), row.get("Units", ""))
+    return ""
+
+
+def first_dataset_parameter_value(rows: list[dict[str, str]], *names: str) -> str:
+    for name in names:
+        value = latest_dataset_parameter_value(rows, name)
+        if value:
+            return value
+    return ""
+
+
+def build_done_snapshot_text(csv_path: Path, dataset_name: str, preform_len_cm: float, done_description: str) -> str:
+    rows = read_csv_rows(csv_path)
+    done_desc = re.sub(r"\s+", " ", str(done_description or "").strip())
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    identity_section = [
+        ("Project", latest_dataset_parameter_value(rows, "Order__Fiber Project")),
+        ("Draw Name", latest_dataset_parameter_value(rows, "Order__Draw Name")),
+        ("Preform", latest_dataset_parameter_value(rows, "Order__Preform Number")),
+        ("Geometry", latest_dataset_parameter_value(rows, "Order__Fiber Geometry Type")),
+        ("Fiber Diameter", latest_dataset_parameter_value(rows, "Order__Fiber Diameter (µm)")),
+        ("Main Coating", latest_dataset_parameter_value(rows, "Order__Main Coating")),
+        ("Main Coat Dia", latest_dataset_parameter_value(rows, "Order__Main Coating Diameter (µm)")),
+        ("Secondary Coating", latest_dataset_parameter_value(rows, "Order__Secondary Coating")),
+        ("Secondary Coat Dia", latest_dataset_parameter_value(rows, "Order__Secondary Coating Diameter (µm)")),
+    ]
+
+    tm_section = [
+        ("Drum", first_dataset_parameter_value(rows, "Drum | Selected", "Process__Selected Drum")),
+        ("Total Saved", latest_dataset_parameter_value(rows, "Total Saved Length")),
+        ("Total Cut", latest_dataset_parameter_value(rows, "Total Cut Length")),
+        ("Good Zones", latest_dataset_parameter_value(rows, "Good Zones Count")),
+        ("Fiber Length End (log end)", first_dataset_parameter_value(rows, "Fiber Length End (log end)", "Fibre Length End (log end)")),
+    ]
+
+    for row in rows:
+        name = str(row.get("Parameter Name", "")).strip()
+        if re.match(r"^Good Zone \d+ Length$", name):
+            tm_section.append((name, format_done_snapshot_value(row.get("Value", ""), row.get("Units", ""))))
+    for row in rows:
+        name = str(row.get("Parameter Name", "")).strip()
+        if re.search(r"Good Zone .*Fib(?:re|er) Length (Min|Max)", name):
+            tm_section.append((name, format_done_snapshot_value(row.get("Value", ""), row.get("Units", ""))))
+
+    step_dict: dict[int, dict[str, str]] = {}
+    for row in rows:
+        name = str(row.get("Parameter Name", "")).strip()
+        if not name.startswith("T&M Step"):
+            continue
+        match = re.match(r"T&M Step (\d+) (.*)", name)
+        if not match:
+            continue
+        step_num = int(match.group(1))
+        label = str(match.group(2) or "").strip()
+        step_dict.setdefault(step_num, {})[label] = format_done_snapshot_value(row.get("Value", ""), row.get("Units", ""))
+
+    instruction_lines: list[str] = []
+    for step_num in sorted(step_dict):
+        data = step_dict[step_num]
+        line = f"Step {step_num}: {data.get('Action', '')}".rstrip()
+        if data.get("Length"):
+            line += f"  ->  {data['Length']}"
+        if data.get("Zone"):
+            line += f"  ({data['Zone']})"
+        instruction_lines.append(line.rstrip())
+        for key, value in data.items():
+            if "Fibre Length Min" in key or "Fibre Length Max" in key or "Fiber Length Min" in key or "Fiber Length Max" in key:
+                instruction_lines.append(f"    {key}: {value}")
+
+    remove_tokens = [
+        "Good Fibre State",
+        "Diameter Error",
+        "Furnace Power",
+        "Furnace MFC",
+        "Preform Speed Actual",
+        "Trend Marker",
+        "Furnace DegC Set",
+        "Intensity",
+        "Poly",
+        "Diameter Deviation",
+    ]
+
+    zone_lines: list[tuple[str, str]] = []
+    seen_zone_keys: set[tuple[str, str]] = set()
+    for row in rows:
+        name = str(row.get("Parameter Name", "")).strip()
+        if not name.startswith("Zone "):
+            continue
+        display_name = normalize_dataset_parameter_name(name)
+        if any(token in name for token in remove_tokens):
+            continue
+        formatted_value = format_done_snapshot_value(row.get("Value", ""), row.get("Units", ""))
+        if not formatted_value:
+            continue
+        if "Pf Process Position" in name:
+            if "| Min" in name or "| Max" in name:
+                dedupe_key = (display_name, formatted_value)
+                if dedupe_key not in seen_zone_keys:
+                    seen_zone_keys.add(dedupe_key)
+                    zone_lines.append((display_name, formatted_value))
+            continue
+        if "Fibre Length" in name or "Fiber Length" in name:
+            if "| Min" in name or "| Max" in name:
+                dedupe_key = (display_name, formatted_value)
+                if dedupe_key not in seen_zone_keys:
+                    seen_zone_keys.add(dedupe_key)
+                    zone_lines.append((display_name, formatted_value))
+            continue
+        if "| Avg" in name:
+            dedupe_key = (display_name, formatted_value)
+            if dedupe_key not in seen_zone_keys:
+                seen_zone_keys.add(dedupe_key)
+                zone_lines.append((display_name, formatted_value))
+
+    output_lines = [
+        "============================================================",
+        "DRAW REPORT - CLEAN SUMMARY",
+        "============================================================",
+        f"Time: {now_str}",
+        f"CSV: {dataset_name}",
+        f"Preform Length After Draw: {format_done_snapshot_value(preform_len_cm, 'cm')}",
+    ]
+    if done_desc:
+        output_lines.append(f"Done Description: {done_desc}")
+    output_lines.extend(["", "******************* T&M SECTION ***************************"])
+    for key, value in tm_section:
+        if value:
+            output_lines.append(f"{key}: {value}")
+    if instruction_lines:
+        output_lines.extend(["", "T&M INSTRUCTIONS:"])
+        output_lines.extend(instruction_lines)
+    output_lines.extend(["", "******************* IDENTITY *******************************"])
+    for key, value in identity_section:
+        if value:
+            output_lines.append(f"{key}: {value}")
+    output_lines.extend(["", "******************* ZONE DATA ******************************"])
+    for key, value in zone_lines:
+        output_lines.append(f"{key}: {value}")
+    output_lines.extend(["", "============================================================", ""])
+    return "\n".join(output_lines)
+
+
+def create_done_snapshot(dataset_name: str, preform_len_cm: float, done_description: str) -> tuple[bool, str]:
+    dataset_file = os.path.basename(str(dataset_name or "").strip())
+    if not dataset_file:
+        return False, "No dataset selected for done snapshot."
+    csv_path = resolve_dataset_csv_path(dataset_file)
+    if not csv_path or not csv_path.exists() or not csv_path.is_file():
+        return False, f"Dataset file was not found for snapshot: {dataset_file}"
+    DONE_SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    identity = parse_draw_dataset_identity(Path(dataset_file).stem)
+    snapshot_stem = str(identity["draw_stem"]) if identity else Path(dataset_file).stem
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", snapshot_stem).strip("._") or "done_snapshot"
+    snapshot_path = DONE_SNAPSHOTS_DIR / f"{safe_name}.txt"
+    atomic_write_text(snapshot_path, build_done_snapshot_text(csv_path, dataset_file, preform_len_cm, done_description), encoding="utf-8")
+    return True, str(snapshot_path)
+
+
+def current_default_printer() -> str:
+    try:
+        result = subprocess.run(
+            ["lpstat", "-d"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        output = (result.stdout or "").strip()
+        if result.returncode == 0 and ":" in output:
+            return output.split(":", 1)[1].strip()
+    except Exception:
+        pass
+    try:
+        lpoptions_path = Path.home() / ".cups" / "lpoptions"
+        if lpoptions_path.exists():
+            for line in lpoptions_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = line.strip()
+                if line.startswith("Default "):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return parts[1].strip()
+    except Exception:
+        pass
+    return ""
+
+
+def try_print_snapshot(snapshot_path: str) -> tuple[bool, str, str]:
+    if not snapshot_path:
+        return False, "", "No snapshot path was provided for printing."
+    if sys.platform != "darwin":
+        return False, "", "System print handoff is supported only on macOS in this build."
+    default_printer = current_default_printer()
+    command = ["lp"]
+    if default_printer:
+        command.extend(["-d", default_printer])
+    command.append(snapshot_path)
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except Exception as exc:
+        return False, default_printer, f"Printer handoff failed: {exc}"
+    stdout = (result.stdout or "").strip()
+    stderr = (result.stderr or "").strip()
+    if result.returncode == 0:
+        return True, default_printer, stdout or "Print job sent successfully."
+    detail = stderr or stdout or "Unknown CUPS print error."
+    if not default_printer:
+        return False, "", f"No default printer is configured. {detail}"
+    return False, default_printer, detail
+
+
+def build_zone_dataset_rows(log_data: dict, zone: dict, zone_number: int) -> list[dict[str, object]]:
+    rows = [
+        {"Parameter Name": "=== ZONE SNAPSHOT ===", "Value": "", "Units": ""},
+        {"Parameter Name": "Zone Number", "Value": zone_number, "Units": ""},
+        {"Parameter Name": "Dashboard Log File", "Value": log_data.get("selected_file", ""), "Units": ""},
+        {"Parameter Name": "Good Zones X Column", "Value": log_data.get("suggested_x", ""), "Units": ""},
+    ]
+    length_col = str(log_data.get("length_column", "")).strip()
+    if length_col:
+        rows.append({"Parameter Name": "Zone Length Column (log)", "Value": length_col, "Units": ""})
+    all_rows = log_data.get("rows", [])
+    numeric_columns = log_data.get("numeric_columns", [])
+    start_index = int(zone.get("startIndex", 0))
+    end_index = int(zone.get("endIndex", 0))
+    if end_index < start_index:
+        start_index, end_index = end_index, start_index
+    segment = all_rows[start_index:end_index + 1]
+    if not segment:
+        return rows
+    rows.append({"Parameter Name": f"Zone {zone_number} | Start", "Value": segment[0].get("__x", ""), "Units": log_data.get("suggested_x", "")})
+    rows.append({"Parameter Name": f"Zone {zone_number} | End", "Value": segment[-1].get("__x", ""), "Units": log_data.get("suggested_x", "")})
+    if length_col:
+        start_len = to_float(segment[0].get(length_col))
+        end_len = to_float(segment[-1].get(length_col))
+        rows.append({"Parameter Name": f"Zone {zone_number} | Length span", "Value": abs(end_len - start_len), "Units": "km"})
+        rows.append({"Parameter Name": f"Zone {zone_number} | {length_col} | Min", "Value": min(to_float(item.get(length_col)) for item in segment), "Units": "km"})
+        rows.append({"Parameter Name": f"Zone {zone_number} | {length_col} | Max", "Value": max(to_float(item.get(length_col)) for item in segment), "Units": "km"})
+    for column in numeric_columns[:10]:
+        values = [to_float(item.get(column)) for item in segment]
+        rows.append({"Parameter Name": f"Zone {zone_number} | {column} | Avg", "Value": sum(values) / max(1, len(values)), "Units": ""})
+        rows.append({"Parameter Name": f"Zone {zone_number} | {column} | Min", "Value": min(values), "Units": ""})
+        rows.append({"Parameter Name": f"Zone {zone_number} | {column} | Max", "Value": max(values), "Units": ""})
+    return rows
+
+
+def save_zone_dataset_exports(selected_csv: str, log_data: dict, zones: list[dict]) -> list[str]:
+    dataset_file = os.path.basename(str(selected_csv or "").strip())
+    if not dataset_file:
+        return []
+    existing_dataset_path = resolve_dataset_csv_path(dataset_file)
+    parent_dir = existing_dataset_path.parent if existing_dataset_path else dataset_directory_for_draw_name(dataset_file)
+    identity = parse_draw_dataset_identity(Path(dataset_file).stem)
+    canonical_stem = str(identity["draw_stem"]) if identity else Path(dataset_file).stem
+    zone_prefixes = {Path(dataset_file).stem, canonical_stem}
+    for zone_prefix in zone_prefixes:
+        for existing in parent_dir.glob(f"{zone_prefix}_Z*"):
+            if existing.is_dir():
+                shutil.rmtree(existing, ignore_errors=True)
+    created: list[str] = []
+    for zone_number, zone in enumerate(zones, start=1):
+        zone_path = zone_dataset_target_path(dataset_file, zone_number)
+        zone_path.parent.mkdir(parents=True, exist_ok=True)
+        zone_rows = build_zone_dataset_rows(log_data, zone, zone_number)
+        write_csv_rows(zone_path, zone_rows, ["Parameter Name", "Value", "Units"])
+        created.append(str(zone_path))
+    return created
 
 
 def build_dashboard_zone_rows(log_data: dict, zones: list[dict]) -> list[dict]:
@@ -4959,7 +8686,17 @@ def save_dashboard_zones_action(payload: dict) -> JsonResponse:
     rows = build_dashboard_zone_rows(log_data, zones)
     ok, message = append_dataset_rows(selected_csv, rows)
     status = 200 if ok else 400
-    return JsonResponse({"ok": ok, "message": message}, status)
+    if not ok:
+        return JsonResponse({"ok": False, "message": message}, status)
+    created_zone_files = save_zone_dataset_exports(selected_csv, log_data, zones)
+    return JsonResponse(
+        {
+            "ok": True,
+            "message": f"{message} Created {len(created_zone_files)} zone CSV file(s).",
+            "zone_files": created_zone_files,
+        },
+        status,
+    )
 
 
 def export_dashboard_math_plot_action(payload: dict) -> JsonResponse:
@@ -4976,15 +8713,16 @@ def export_dashboard_math_plot_action(payload: dict) -> JsonResponse:
     safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", filename).strip("._") or "tower_math_plot.png"
     if not safe_name.lower().endswith(".png"):
         safe_name = f"{safe_name}.png"
-    DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
-    target = DOWNLOADS_DIR / safe_name
+    plot_exports_dir = DASHBOARD_PLOTS_DIR
+    plot_exports_dir.mkdir(parents=True, exist_ok=True)
+    target = plot_exports_dir / safe_name
     stem = target.stem
     suffix = target.suffix
     version = 2
     while target.exists():
-        target = DOWNLOADS_DIR / f"{stem}_{version}{suffix}"
+        target = plot_exports_dir / f"{stem}_{version}{suffix}"
         version += 1
-    target.write_bytes(raw)
+    atomic_write_bytes(target, raw)
     return JsonResponse({
         "ok": True,
         "saved_path": str(target),
@@ -5006,7 +8744,7 @@ def build_home_payload() -> JsonResponse:
             "summary": "A real page system with shared shell, page routing, and live Tower data summaries delivered through lightweight Python APIs.",
         },
         "metrics": [
-            {"label": "Active Draws", "value": draws["active"]},
+            {"label": "Active Draws", "value": draws["in_progress"]},
             {"label": "Completed", "value": draws["done"]},
             {"label": "Upcoming Events", "value": len(schedule["upcoming"])},
             {"label": "Open Part Orders", "value": len(parts["open_orders"])},
@@ -5028,6 +8766,7 @@ def build_parts_payload() -> JsonResponse:
     payload = summarize_part_orders()
     payload["inventory"] = summarize_inventory()
     payload["manual_lookup"] = summarize_parts_manual_lookup()
+    payload["manual_index_rows"] = get_parts_manual_index().get("rows", [])
     return JsonResponse(payload)
 
 
@@ -5044,23 +8783,29 @@ def create_part_order_action(payload: dict) -> JsonResponse:
     part_name = str(payload.get("partName", "")).strip()
     if not part_name:
         return JsonResponse({"ok": False, "message": "Part name is required."}, 400)
+    status = str(payload.get("status", "Opened")).strip() or "Opened"
+    if status not in PART_STATUS_ORDER or status == "Archived":
+        status = "Opened"
+    is_approved_step = status in {"Approved", "Ordered", "Received", "Archived"}
+    is_ordered_step = status in {"Ordered", "Received", "Archived"}
+    is_received_step = status in {"Received", "Archived"}
     new_row = {
-        "Status": "Opened",
+        "Status": status,
         "Part Name": part_name,
         "Serial Number": str(payload.get("serialNumber", "")).strip(),
         "Project Name": str(payload.get("project", "")).strip(),
         "Details": str(payload.get("details", "")).strip(),
         "Opened By": str(payload.get("openedBy", "")).strip(),
-        "Approval Requested From": str(payload.get("approvalRequestedFrom", "")).strip(),
-        "Approved": "",
-        "Approved By": "",
-        "Approval Date": "",
-        "Received Date": "",
-        "Received State": "",
-        "Ordered By": "",
-        "Date Ordered": "",
-        "Company": str(payload.get("company", "")).strip(),
-        "Inventory Synced": "",
+        "Approval Requested From": str(payload.get("approvalRequestedFrom", "")).strip() if status in {"Wait for Approval", "Approved", "Ordered", "Received"} else "",
+        "Approved": "Yes" if is_approved_step else "No",
+        "Approved By": str(payload.get("approvedBy", "")).strip() if is_approved_step else "",
+        "Approval Date": str(payload.get("approvalDate", "")).strip() if is_approved_step else "",
+        "Received Date": str(payload.get("receivedDate", "")).strip() if is_received_step else "",
+        "Received State": "Waiting for inventory action" if is_received_step else "",
+        "Ordered By": str(payload.get("orderedBy", "")).strip() if is_ordered_step else "",
+        "Date Ordered": str(payload.get("dateOrdered", "")).strip() if is_ordered_step else "",
+        "Company": str(payload.get("company", "")).strip() if is_ordered_step else "",
+        "Inventory Synced": "Pending" if is_received_step else "",
         "Maintenance Component": str(payload.get("maintenanceComponent", "")).strip(),
         "Maintenance Task": str(payload.get("maintenanceTask", "")).strip(),
         "Maintenance Task ID": str(payload.get("maintenanceTaskId", "")).strip(),
@@ -5082,6 +8827,7 @@ def update_part_order_action(payload: dict) -> JsonResponse:
     if index < 0 or index >= len(rows):
         return JsonResponse({"ok": False, "message": "Order not found."}, 400)
     row = rows[index]
+    was_inventory_synced = str(row.get("Inventory Synced", "")).strip().lower() == "yes"
     current_status = str(row.get("Status", "Opened")).strip() or "Opened"
     status = str(payload.get("status", current_status)).strip() or current_status
     if status not in PART_STATUS_ORDER:
@@ -5135,20 +8881,33 @@ def update_part_order_action(payload: dict) -> JsonResponse:
         row["Received State"] = ""
         row["Inventory Synced"] = ""
     inventory_action = str(payload.get("inventoryAction", "")).strip()
+    inventory_sync_completed = False
+    if (
+        is_received_step
+        and inventory_action in {"Locate in inventory", "Mount on machine"}
+        and not was_inventory_synced
+    ):
+        inventory_sync_completed = sync_part_order_into_inventory(row, payload)
     if is_received_step:
         if inventory_action == "Locate in inventory":
-            row["Received State"] = "Located in inventory"
-            row["Inventory Synced"] = "Yes"
+            if inventory_sync_completed or was_inventory_synced:
+                row["Received State"] = "Located in inventory"
+                row["Inventory Synced"] = "Yes"
+            else:
+                row["Received State"] = "Waiting for inventory action"
+                row["Inventory Synced"] = "Pending"
         elif inventory_action == "Mount on machine":
-            row["Received State"] = "Mounted on machine"
-            row["Inventory Synced"] = "Yes"
+            if inventory_sync_completed or was_inventory_synced:
+                row["Received State"] = "Mounted on machine"
+                row["Inventory Synced"] = "Yes"
+            else:
+                row["Received State"] = "Waiting for inventory action"
+                row["Inventory Synced"] = "Pending"
         elif not str(row.get("Received State", "")).strip():
             row["Received State"] = "Waiting for inventory action"
             row["Inventory Synced"] = "Pending"
         elif str(row.get("Received State", "")).strip() == "Waiting for inventory action":
             row["Inventory Synced"] = "Pending"
-    if status == "Archived" and inventory_action in {"Locate in inventory", "Mount on machine"}:
-        sync_part_order_into_inventory(row, payload)
     ensure_parts_company(row.get("Company", ""))
     rows[index] = row
     write_csv_rows(PART_ORDERS, rows, fieldnames)
@@ -5226,7 +8985,10 @@ def build_diagnostics_payload() -> JsonResponse:
 
 def save_diagnostics_paths_action(payload: dict) -> JsonResponse:
     reset_defaults = str(payload.get("resetDefaults", "")).strip().lower() in {"1", "true", "yes"}
+    current_paths = {str(item["key"]): Path(current_path) for item, current_path in current_tracked_paths()}
+    defaults = tracked_path_defaults()
     overrides: dict[str, Path] = {}
+    desired_paths: dict[str, Path] = {}
     for item in TRACKED_PATH_SPECS:
         key = str(item["key"])
         label = str(item["label"])
@@ -5235,8 +8997,9 @@ def save_diagnostics_paths_action(payload: dict) -> JsonResponse:
         if not reset_defaults and not raw_value:
             return JsonResponse({"ok": False, "message": f"{label} is required."}, 400)
         if reset_defaults:
-            continue
-        normalized = normalize_tracked_path_value(raw_value)
+            normalized = defaults[key]
+        else:
+            normalized = normalize_tracked_path_value(raw_value)
         if normalized.exists():
             if kind == "dir" and not normalized.is_dir():
                 return JsonResponse({"ok": False, "message": f"{label} must point to a folder."}, 400)
@@ -5246,13 +9009,31 @@ def save_diagnostics_paths_action(payload: dict) -> JsonResponse:
             normalized.mkdir(parents=True, exist_ok=True)
         else:
             normalized.parent.mkdir(parents=True, exist_ok=True)
-        overrides[key] = normalized
+        desired_paths[key] = normalized
+        if not reset_defaults:
+            overrides[key] = normalized
+    move_notes: list[str] = []
+    try:
+        for item in TRACKED_PATH_SPECS:
+            key = str(item["key"])
+            current_path = current_paths[key]
+            next_path = desired_paths[key]
+            if current_path.resolve() == next_path.resolve():
+                continue
+            move_notes.extend(relocate_tracked_path(item, current_path, next_path))
+    except ValueError as exc:
+        return JsonResponse({"ok": False, "message": str(exc)}, 400)
     save_tracked_path_overrides({} if reset_defaults else overrides)
-    apply_tracked_path_overrides({} if reset_defaults else overrides)
+    sync_tracked_path_overrides_if_needed(force=True)
+    ensure_container_logger_process(force_restart=True)
+    message = "Tracked paths reset to Tower defaults." if reset_defaults else "Tracked paths saved and applied to the Python app."
+    if move_notes:
+        message = f"{message} {move_notes[-1]}"
     return JsonResponse(
         {
             "ok": True,
-            "message": "Tracked paths reset to Tower defaults." if reset_defaults else "Tracked paths saved and applied to the Python app.",
+            "message": message,
+            "moveNotes": move_notes,
             "bootstrap": build_bootstrap_payload().body,
         }
     )
@@ -5280,7 +9061,7 @@ def create_operations_report_action(payload: dict) -> JsonResponse:
     if not filename.lower().endswith(".md"):
         filename = f"{filename}.md"
     output_path = REPORT_CENTER_DIR / Path(filename).name
-    output_path.write_text(build_operations_report_markdown(title, start_date, end_date, sections), encoding="utf-8")
+    atomic_write_text(output_path, build_operations_report_markdown(title, start_date, end_date, sections), encoding="utf-8")
     return JsonResponse(
         {
             "ok": True,
@@ -5308,7 +9089,7 @@ def create_development_report_action(payload: dict) -> JsonResponse:
         filename = f"{filename}.{default_suffix}"
     output_path = REPORT_CENTER_DIR / Path(filename).name
     content = build_development_report_html(project_name) if export_format == "html" else build_development_report_markdown(project_name)
-    output_path.write_text(content, encoding="utf-8")
+    atomic_write_text(output_path, content, encoding="utf-8")
     encoded_name = quote(output_path.name)
     return JsonResponse(
         {
@@ -5328,7 +9109,7 @@ def create_development_project_action(payload: dict) -> JsonResponse:
     project_name = str(payload.get("projectName", "")).strip()
     if not project_name:
         return JsonResponse({"ok": False, "message": "Project name is required."}, 400)
-    rows = read_csv_rows(DATA_DIR / "development_projects.csv")
+    rows = read_csv_rows(DEVELOPMENT_PROJECTS)
     fieldnames = development_project_fieldnames()
     if any(str(row.get("Project Name", "")).strip() == project_name for row in rows):
         return JsonResponse({"ok": False, "message": "Project already exists."}, 400)
@@ -5345,7 +9126,7 @@ def create_development_project_action(payload: dict) -> JsonResponse:
             "Summary Researcher": "",
         }
     )
-    write_csv_rows(DATA_DIR / "development_projects.csv", rows, fieldnames)
+    write_csv_rows(DEVELOPMENT_PROJECTS, rows, fieldnames)
     return JsonResponse({"ok": True, "message": "Development project created.", "bootstrap": build_bootstrap_payload().body})
 
 
@@ -5354,7 +9135,7 @@ def save_development_summary_action(payload: dict) -> JsonResponse:
     summary_notes = str(payload.get("summaryNotes", "")).strip()
     if not project_name or not summary_notes:
         return JsonResponse({"ok": False, "message": "Project and summary notes are required."}, 400)
-    rows = read_csv_rows(DATA_DIR / "development_projects.csv")
+    rows = read_csv_rows(DEVELOPMENT_PROJECTS)
     fieldnames = development_project_fieldnames()
     index = next((i for i, row in enumerate(rows) if str(row.get("Project Name", "")).strip() == project_name), None)
     if index is None:
@@ -5365,7 +9146,7 @@ def save_development_summary_action(payload: dict) -> JsonResponse:
     row["Summary Date"] = str(payload.get("summaryDate", "")).strip() or datetime.now().strftime("%Y-%m-%d")
     row["Summary Researcher"] = str(payload.get("summaryResearcher", "")).strip()
     rows[index] = row
-    write_csv_rows(DATA_DIR / "development_projects.csv", rows, fieldnames)
+    write_csv_rows(DEVELOPMENT_PROJECTS, rows, fieldnames)
     return JsonResponse({"ok": True, "message": "Project summary saved.", "bootstrap": build_bootstrap_payload().body})
 
 
@@ -5374,8 +9155,8 @@ def create_development_update_action(payload: dict) -> JsonResponse:
     notes = str(payload.get("updateNotes", "")).strip()
     if not project_name or not notes:
         return JsonResponse({"ok": False, "message": "Project and update notes are required."}, 400)
-    rows = read_csv_rows(DATA_DIR / "experiment_updates.csv")
-    fieldnames = read_csv_fieldnames(DATA_DIR / "experiment_updates.csv") or ["Experiment Title", "Update Date", "Researcher", "Update Notes", "Project Name"]
+    rows = read_csv_rows(EXPERIMENT_UPDATES)
+    fieldnames = read_csv_fieldnames(EXPERIMENT_UPDATES) or ["Experiment Title", "Update Date", "Researcher", "Update Notes", "Project Name"]
     rows.append(
         {
             "Experiment Title": str(payload.get("updateTitle", "")).strip() or str(payload.get("experimentTitle", "")).strip(),
@@ -5385,8 +9166,8 @@ def create_development_update_action(payload: dict) -> JsonResponse:
             "Project Name": project_name,
         }
     )
-    write_csv_rows(DATA_DIR / "experiment_updates.csv", rows, fieldnames)
-    return JsonResponse({"ok": True, "message": "Development update saved.", "bootstrap": build_bootstrap_payload().body})
+    write_csv_rows(EXPERIMENT_UPDATES, rows, fieldnames)
+    return JsonResponse({"ok": True, "message": "Development update saved."})
 
 
 def create_development_experiment_action(payload: dict) -> JsonResponse:
@@ -5394,8 +9175,8 @@ def create_development_experiment_action(payload: dict) -> JsonResponse:
     experiment_title = str(payload.get("experimentTitle", "")).strip()
     if not project_name or not experiment_title:
         return JsonResponse({"ok": False, "message": "Project and experiment title are required."}, 400)
-    rows = read_csv_rows(DATA_DIR / "development_experiments.csv")
-    fieldnames = read_csv_fieldnames(DATA_DIR / "development_experiments.csv") or [
+    rows = read_csv_rows(DEVELOPMENT_EXPERIMENTS)
+    fieldnames = read_csv_fieldnames(DEVELOPMENT_EXPERIMENTS) or [
         "Project Name",
         "Experiment Title",
         "Date",
@@ -5439,7 +9220,7 @@ def create_development_experiment_action(payload: dict) -> JsonResponse:
             while candidate.exists():
                 candidate = exp_dir / f"{stem}__{version}{suffix}"
                 version += 1
-            candidate.write_bytes(raw)
+            atomic_write_bytes(candidate, raw)
             attachment_paths.append(str(candidate))
     rows.append(
         {
@@ -5459,7 +9240,7 @@ def create_development_experiment_action(payload: dict) -> JsonResponse:
             "Markdown Notes": str(payload.get("markdownNotes", "")).strip(),
         }
     )
-    write_csv_rows(DATA_DIR / "development_experiments.csv", rows, fieldnames)
+    write_csv_rows(DEVELOPMENT_EXPERIMENTS, rows, fieldnames)
     return JsonResponse({"ok": True, "message": "Experiment saved.", "bootstrap": build_bootstrap_payload().body})
 
 
@@ -5469,8 +9250,8 @@ def update_development_experiment_action(payload: dict) -> JsonResponse:
     original_date = str(payload.get("originalDate", "")).strip()
     if not project_name or not original_title or not original_date:
         return JsonResponse({"ok": False, "message": "Choose an existing experiment first."}, 400)
-    rows = read_csv_rows(DATA_DIR / "development_experiments.csv")
-    fieldnames = read_csv_fieldnames(DATA_DIR / "development_experiments.csv") or [
+    rows = read_csv_rows(DEVELOPMENT_EXPERIMENTS)
+    fieldnames = read_csv_fieldnames(DEVELOPMENT_EXPERIMENTS) or [
         "Project Name",
         "Experiment Title",
         "Date",
@@ -5513,7 +9294,7 @@ def update_development_experiment_action(payload: dict) -> JsonResponse:
             row[field_name] = str(payload.get(source_key, "")).strip()
     row["Is Drawing"] = "True" if payload.get("isDrawing") else "False"
     rows[index] = row
-    write_csv_rows(DATA_DIR / "development_experiments.csv", rows, fieldnames)
+    write_csv_rows(DEVELOPMENT_EXPERIMENTS, rows, fieldnames)
     return JsonResponse({"ok": True, "message": "Experiment updated.", "bootstrap": build_bootstrap_payload().body})
 
 
@@ -5522,28 +9303,28 @@ def manage_development_project_action(payload: dict) -> JsonResponse:
     action = str(payload.get("action", "")).strip().lower()
     if not project_name:
         return JsonResponse({"ok": False, "message": "Choose a project first."}, 400)
-    rows = read_csv_rows(DATA_DIR / "development_projects.csv")
+    rows = read_csv_rows(DEVELOPMENT_PROJECTS)
     fieldnames = development_project_fieldnames()
     index = next((i for i, row in enumerate(rows) if str(row.get("Project Name", "")).strip() == project_name), None)
     if index is None:
         return JsonResponse({"ok": False, "message": "Project not found."}, 404)
     if action == "archive":
         rows[index]["Archived"] = "True"
-        write_csv_rows(DATA_DIR / "development_projects.csv", rows, fieldnames)
+        write_csv_rows(DEVELOPMENT_PROJECTS, rows, fieldnames)
         return JsonResponse({"ok": True, "message": "Project archived.", "bootstrap": build_bootstrap_payload().body})
     if action == "restore":
         rows[index]["Archived"] = "False"
-        write_csv_rows(DATA_DIR / "development_projects.csv", rows, fieldnames)
+        write_csv_rows(DEVELOPMENT_PROJECTS, rows, fieldnames)
         return JsonResponse({"ok": True, "message": "Project restored.", "bootstrap": build_bootstrap_payload().body})
     if action == "delete":
         del rows[index]
-        write_csv_rows(DATA_DIR / "development_projects.csv", rows, fieldnames)
-        exp_rows = [row for row in read_csv_rows(DATA_DIR / "development_experiments.csv") if str(row.get("Project Name", "")).strip() != project_name]
-        exp_fields = read_csv_fieldnames(DATA_DIR / "development_experiments.csv")
-        write_csv_rows(DATA_DIR / "development_experiments.csv", exp_rows, exp_fields)
-        upd_rows = [row for row in read_csv_rows(DATA_DIR / "experiment_updates.csv") if str(row.get("Project Name", "")).strip() != project_name]
-        upd_fields = read_csv_fieldnames(DATA_DIR / "experiment_updates.csv")
-        write_csv_rows(DATA_DIR / "experiment_updates.csv", upd_rows, upd_fields)
+        write_csv_rows(DEVELOPMENT_PROJECTS, rows, fieldnames)
+        exp_rows = [row for row in read_csv_rows(DEVELOPMENT_EXPERIMENTS) if str(row.get("Project Name", "")).strip() != project_name]
+        exp_fields = read_csv_fieldnames(DEVELOPMENT_EXPERIMENTS)
+        write_csv_rows(DEVELOPMENT_EXPERIMENTS, exp_rows, exp_fields)
+        upd_rows = [row for row in read_csv_rows(EXPERIMENT_UPDATES) if str(row.get("Project Name", "")).strip() != project_name]
+        upd_fields = read_csv_fieldnames(EXPERIMENT_UPDATES)
+        write_csv_rows(EXPERIMENT_UPDATES, upd_rows, upd_fields)
         return JsonResponse({"ok": True, "message": "Project deleted.", "bootstrap": build_bootstrap_payload().body})
     return JsonResponse({"ok": False, "message": "Unknown project action."}, 400)
 
@@ -5579,7 +9360,33 @@ def finalize_done_action(payload: dict) -> JsonResponse:
         {"Parameter Name": "Done Timestamp", "Value": now_str, "Units": ""},
         {"Parameter Name": "Preform Length After Draw", "Value": preform_len_cm, "Units": "cm"},
     ])
-    return JsonResponse({"ok": True, "message": "Draw marked as done.", "bootstrap": build_bootstrap_payload().body})
+    snapshot_ok, snapshot_detail = create_done_snapshot(dataset_name, preform_len_cm, done_description)
+    message = "Draw marked as done."
+    print_ok = False
+    print_detail = ""
+    printer_name = ""
+    if snapshot_ok:
+        message = f"{message} Snapshot saved in done snapshots."
+        print_ok, printer_name, print_detail = try_print_snapshot(snapshot_detail)
+        if print_ok:
+            message = f"{message} Print job sent."
+        else:
+            printer_label = printer_name or "default printer"
+            detail = print_detail or "Printer handoff failed."
+            message = f"{message} Print warning: {printer_label} not available. {detail}"
+    else:
+        message = f"{message} Snapshot warning: {snapshot_detail}"
+    return JsonResponse(
+        {
+            "ok": True,
+            "message": message,
+            "done_snapshot_path": snapshot_detail if snapshot_ok else "",
+            "print_ok": print_ok,
+            "print_detail": print_detail,
+            "printer_name": printer_name,
+            "bootstrap": build_bootstrap_payload().body,
+        }
+    )
 
 
 def finalize_failed_action(payload: dict) -> JsonResponse:
@@ -5715,6 +9522,10 @@ def build_bootstrap_payload() -> JsonResponse:
     )
 
 
+def development_media_preview_route_action() -> JsonResponse:
+    return JsonResponse({"ok": False, "message": "Preview path is required."}, 400)
+
+
 API_ROUTES = {
     "/api/bootstrap": build_bootstrap_payload,
     "/api/home": build_home_payload,
@@ -5730,6 +9541,7 @@ API_ROUTES = {
     "/api/report-center": build_report_center_payload,
     "/api/sql-lab": build_sql_lab_payload,
     "/api/development": build_development_payload,
+    "/api/development/media-preview": development_media_preview_route_action,
     "/api/data-diagnostics": build_diagnostics_payload,
 }
 
@@ -5746,7 +9558,10 @@ POST_API_ROUTES = {
     "/api/report-center/development-export": create_development_report_action,
     "/api/report-center/operations-export": create_operations_report_action,
     "/api/maintenance/complete": complete_maintenance_task_action,
+    "/api/maintenance/create-task": create_maintenance_task_action,
     "/api/maintenance/create-parts-orders": create_maintenance_part_orders_action,
+    "/api/maintenance/fault": save_maintenance_fault_action,
+    "/api/maintenance/delete-task": delete_maintenance_task_action,
     "/api/maintenance/schedule": schedule_maintenance_tasks_action,
     "/api/maintenance/runtime": save_maintenance_runtime_action,
     "/api/maintenance/state": set_maintenance_state_action,
@@ -5759,8 +9574,12 @@ POST_API_ROUTES = {
     "/api/parts/inventory-stock": update_inventory_stock_action,
     "/api/parts/unmount": unmount_inventory_item_action,
     "/api/parts/update": update_part_order_action,
+    "/api/consumables/containers-save": save_consumables_containers_action,
+    "/api/consumables/stock-save": save_consumables_stock_action,
+    "/api/consumables/coatings-save": save_consumables_coatings_action,
     "/api/consumables/dies-save": save_consumables_dies_action,
     "/api/consumables/temps-save": save_consumables_temps_action,
+    "/api/process-setup/auto-dies": auto_select_process_setup_dies_action,
     "/api/process-setup/manual-start": create_process_setup_manual_action,
     "/api/process-setup/scheduled-start": create_process_setup_scheduled_action,
     "/api/process-setup/select-dataset": select_process_setup_dataset_action,
@@ -5771,18 +9590,109 @@ POST_API_ROUTES = {
     "/api/dashboard/save-zones": save_dashboard_zones_action,
     "/api/dashboard/math-plot-export": export_dashboard_math_plot_action,
     "/api/sql-lab/filter": run_sql_lab_filter_action,
+    "/api/sql-lab/export-results": create_sql_lab_results_export_action,
     "/api/sql-lab/analysis-scope": run_sql_lab_analysis_scope_action,
     "/api/sql-lab/query": run_sql_lab_query_action,
     "/api/data-diagnostics/paths": save_diagnostics_paths_action,
     "/api/data-diagnostics/full-backup": create_full_backup_action,
 }
 
+POST_ROUTE_LOCKS: dict[str, tuple[Path | str, ...]] = {
+    "/api/development/project": (DEVELOPMENT_PROJECTS,),
+    "/api/development/summary": (DEVELOPMENT_PROJECTS,),
+    "/api/development/update": (EXPERIMENT_UPDATES,),
+    "/api/development/experiment": (DEVELOPMENT_EXPERIMENTS, DEVELOPMENT_MEDIA_DIR),
+    "/api/development/experiment-update": (DEVELOPMENT_EXPERIMENTS,),
+    "/api/development/manage": (
+        DEVELOPMENT_PROJECTS,
+        DEVELOPMENT_EXPERIMENTS,
+        EXPERIMENT_UPDATES,
+    ),
+    "/api/draw-finalize/done": (DRAW_ORDERS, DATASET_DIR, DONE_SNAPSHOTS_DIR),
+    "/api/draw-finalize/failed": (DRAW_ORDERS, DATASET_DIR, FAULTS_LOG),
+    "/api/draw-finalize/reset": (DRAW_ORDERS,),
+    "/api/report-center/development-export": (
+        REPORT_CENTER_DIR,
+        DEVELOPMENT_PROJECTS,
+        DEVELOPMENT_EXPERIMENTS,
+        EXPERIMENT_UPDATES,
+    ),
+    "/api/report-center/operations-export": (REPORT_CENTER_DIR,),
+    "/api/sql-lab/export-results": (
+        REPORT_CENTER_DIR,
+        DATASET_DIR,
+        MAINTENANCE_ACTIONS,
+        FAULTS_LOG,
+    ),
+    "/api/maintenance/complete": (MAINTENANCE_DIR, PARTS_INVENTORY),
+    "/api/maintenance/create-parts-orders": (MAINTENANCE_DIR, PART_ORDERS),
+    "/api/maintenance/fault": (FAULTS_LOG, FAULTS_ACTIONS_LOG),
+    "/api/maintenance/delete-task": (MAINTENANCE_DIR, PART_ORDERS, PARTS_INVENTORY),
+    "/api/maintenance/schedule": (MAINTENANCE_DIR, TOWER_SCHEDULE),
+    "/api/maintenance/runtime": (MAINTENANCE_RUNTIME,),
+    "/api/maintenance/state": (MAINTENANCE_STATE,),
+    "/api/maintenance/work-package": (MAINTENANCE_DIR,),
+    "/api/schedule/add": (TOWER_SCHEDULE,),
+    "/api/schedule/delete": (TOWER_SCHEDULE,),
+    "/api/schedule/save-master": (TOWER_SCHEDULE,),
+    "/api/parts/delete": (PART_ORDERS,),
+    "/api/parts/create": (PART_ORDERS, PARTS_COMPANIES),
+    "/api/parts/inventory-stock": (PARTS_INVENTORY, PARTS_COMPANIES),
+    "/api/parts/unmount": (PARTS_INVENTORY,),
+    "/api/parts/update": (PART_ORDERS, PARTS_INVENTORY, PARTS_COMPANIES),
+    "/api/consumables/containers-save": (CONTAINER_CONFIG,),
+    "/api/consumables/stock-save": (COATING_STOCK, COATING_INVENTORY_META),
+    "/api/consumables/coatings-save": (COATING_CONFIG,),
+    "/api/consumables/dies-save": (DIES_CONFIG,),
+    "/api/consumables/temps-save": (HEATER_CONFIG, TOWER_TEMPS),
+    "/api/process-setup/manual-start": (DRAW_ORDERS, DATASET_DIR, SELECTED_CSV_JSON),
+    "/api/process-setup/scheduled-start": (DRAW_ORDERS, DATASET_DIR, SELECTED_CSV_JSON),
+    "/api/process-setup/select-dataset": (SELECTED_CSV_JSON,),
+    "/api/process-setup/save-all": (DATASET_DIR, SELECTED_CSV_JSON),
+    "/api/order-draw/create": (DRAW_ORDERS, PROJECTS_TEMPLATES),
+    "/api/order-draw/template": (PROJECTS_TEMPLATES,),
+    "/api/order-draw/schedule": (DRAW_ORDERS,),
+    "/api/dashboard/save-zones": (DATASET_DIR,),
+    "/api/dashboard/math-plot-export": (REPORTS_DIR,),
+    "/api/data-diagnostics/paths": (TRACKED_PATH_OVERRIDES_FILE,),
+    "/api/data-diagnostics/full-backup": (BACKUPS_DIR, TRACKED_PATH_OVERRIDES_FILE),
+}
+
+
+def resolve_post_route_lock_paths(route: str) -> list[Path | str]:
+    return list(POST_ROUTE_LOCKS.get(route, ()))
+
+
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    item_method = getattr(value, "item", None)
+    if callable(item_method):
+        try:
+            return _json_safe(item_method())
+        except Exception:
+            return str(value)
+    return value
+
 
 class TowerRebuildHandler(BaseHTTPRequestHandler):
     def _send_json(self, payload: dict, status: int = 200) -> None:
-        body = json.dumps(payload).encode("utf-8")
+        body = json.dumps(_json_safe(payload), allow_nan=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -5802,10 +9712,23 @@ class TowerRebuildHandler(BaseHTTPRequestHandler):
         body = path.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", content_type or "application/octet-stream")
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
         if download_name:
             self.send_header("Content-Disposition", f'attachment; filename="{download_name}"')
         elif inline:
             self.send_header("Content-Disposition", f'inline; filename="{path.name}"')
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_bytes(self, body: bytes, content_type: str, status: int = 200) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -5817,18 +9740,29 @@ class TowerRebuildHandler(BaseHTTPRequestHandler):
         raw = Path(text).expanduser()
         candidates: list[Path] = []
         normalized_variants = [text]
+        stripped_text = _strip_invisible_path_marks(text)
+        if stripped_text and stripped_text not in normalized_variants:
+            normalized_variants.append(stripped_text)
         for prefix in ("development_media/", "data/development_media/", "manuals/", "maintenance/"):
-            if text.startswith(prefix):
-                normalized_variants.append(text[len(prefix):])
+            for variant in tuple(normalized_variants):
+                if variant.startswith(prefix):
+                    trimmed = variant[len(prefix):]
+                    if trimmed and trimmed not in normalized_variants:
+                        normalized_variants.append(trimmed)
         if raw.is_absolute():
             candidates.append(raw.resolve())
+            if stripped_text and stripped_text != text:
+                candidates.append(Path(stripped_text).expanduser().resolve())
         else:
             for variant in normalized_variants:
                 for root in roots:
                     candidates.append((root / variant).resolve())
                 file_name = Path(variant).name
+                stripped_name = _strip_invisible_path_marks(file_name)
                 for root in (fallback_names or []):
                     candidates.append((root / file_name).resolve())
+                    if stripped_name and stripped_name != file_name:
+                        candidates.append((root / stripped_name).resolve())
         allowed_roots = [root.resolve() for root in roots + (fallback_names or [])]
         seen: set[str] = set()
         for candidate in candidates:
@@ -5843,6 +9777,7 @@ class TowerRebuildHandler(BaseHTTPRequestHandler):
         return None
 
     def do_GET(self) -> None:
+        sync_tracked_path_overrides_if_needed()
         parsed = urlparse(self.path)
         route = parsed.path
         if route == "/api/maintenance/manual-prefetch":
@@ -5912,6 +9847,29 @@ class TowerRebuildHandler(BaseHTTPRequestHandler):
                 return
             self._send_file(rendered_path)
             return
+        if route == "/api/maintenance/manual-page-pdf":
+            params = parse_qs(parsed.query)
+            requested = str((params.get("path") or [""])[0]).strip()
+            page_number = int(str((params.get("page") or ["1"])[0]).strip() or "1")
+            download_requested = str((params.get("download") or [""])[0]).strip().lower() in {"1", "true", "yes"}
+            if not requested:
+                self._send_json({"ok": False, "message": "Missing path."}, 400)
+                return
+            candidate = self._resolve_allowed_file(
+                requested,
+                roots=[ROOT_DIR, MAINTENANCE_DIR, MANUALS_DIR, EXTERNAL_MANUALS_DIR],
+                fallback_names=[MANUALS_DIR, EXTERNAL_MANUALS_DIR, MAINTENANCE_DIR],
+            )
+            if candidate is None:
+                self._send_json({"ok": False, "message": "File not found."}, 404)
+                return
+            try:
+                exported_path = export_manual_page_pdf(candidate, page_number)
+            except Exception as exc:
+                self._send_json({"ok": False, "message": f"Manual page PDF export failed: {exc}"}, 500)
+                return
+            self._send_file(exported_path, exported_path.name if download_requested else None, inline=not download_requested)
+            return
         if route == "/api/maintenance/manual":
             params = parse_qs(parsed.query)
             requested = str((params.get("path") or [""])[0]).strip()
@@ -5936,13 +9894,57 @@ class TowerRebuildHandler(BaseHTTPRequestHandler):
                 return
             candidate = self._resolve_allowed_file(
                 requested,
-                roots=[DEVELOPMENT_MEDIA_DIR, DATA_DIR / "development_media"],
-                fallback_names=[DEVELOPMENT_MEDIA_DIR, DATA_DIR / "development_media"],
+                roots=[DEVELOPMENT_MEDIA_DIR, DATA_DIR / "development_media", ROOT_DIR],
+                fallback_names=[DEVELOPMENT_MEDIA_DIR, DATA_DIR / "development_media", ROOT_DIR / "coating_scripts"],
             )
             if candidate is None:
                 self._send_json({"ok": False, "message": "File not found."}, 404)
                 return
             self._send_file(candidate)
+            return
+        if route == "/api/development/media-preview":
+            params = parse_qs(parsed.query)
+            requested = str((params.get("path") or [""])[0]).strip()
+            if not requested:
+                self._send_bytes(
+                    development_media_placeholder_svg("Missing path", "No file path was provided for preview."),
+                    "image/svg+xml; charset=utf-8",
+                    400,
+                )
+                return
+            candidate = self._resolve_allowed_file(
+                requested,
+                roots=[DEVELOPMENT_MEDIA_DIR, DATA_DIR / "development_media", ROOT_DIR],
+                fallback_names=[DEVELOPMENT_MEDIA_DIR, DATA_DIR / "development_media", ROOT_DIR / "coating_scripts"],
+            )
+            if candidate is None:
+                self._send_bytes(
+                    development_media_placeholder_svg(Path(requested).name or "File missing", "Saved attachment path is not available on disk."),
+                    "image/svg+xml; charset=utf-8",
+                    404,
+                )
+                return
+            suffix = candidate.suffix.lower()
+            if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}:
+                self._send_file(candidate, inline=True)
+                return
+            if suffix == ".pdf":
+                try:
+                    preview_path = render_manual_page_image(candidate, 1)
+                    self._send_file(preview_path, inline=True)
+                    return
+                except Exception as exc:
+                    self._send_bytes(
+                        development_media_placeholder_svg(candidate.name, f"PDF preview unavailable: {exc}"),
+                        "image/svg+xml; charset=utf-8",
+                        200,
+                    )
+                    return
+            self._send_bytes(
+                development_media_placeholder_svg(candidate.name, "Open file to inspect this attachment type."),
+                "image/svg+xml; charset=utf-8",
+                200,
+            )
             return
         if route == "/api/dashboard/log":
             params = parse_qs(parsed.query)
@@ -6008,23 +10010,33 @@ class TowerRebuildHandler(BaseHTTPRequestHandler):
         self._send_json({"error": "Not found"}, 404)
 
     def do_POST(self) -> None:
+        sync_tracked_path_overrides_if_needed()
         parsed = urlparse(self.path)
         route = parsed.path
         if route not in POST_API_ROUTES:
             self._send_json({"ok": False, "message": "Not found"}, 404)
             return
         payload = self._read_json_body()
-        response = POST_API_ROUTES[route](payload)
+        try:
+            with hold_request_locks(resolve_post_route_lock_paths(route)):
+                response = POST_API_ROUTES[route](payload)
+        except TimeoutError as exc:
+            self._send_json({"ok": False, "message": str(exc)}, 503)
+            return
         self._send_json(response.body, response.status)
 
 
 def run(host: str | None = None, port: int | None = None) -> None:
     ensure_runtime_directories()
+    ensure_container_logger_process(force_restart=True)
     bind_host = str(host or DEFAULT_BIND_HOST).strip() or "127.0.0.1"
     bind_port = int(port or DEFAULT_BIND_PORT or 8010)
-    server = HTTPServer((bind_host, bind_port), TowerRebuildHandler)
+    server = ThreadingHTTPServer((bind_host, bind_port), TowerRebuildHandler)
     print(f"Tower rebuild running on http://{bind_host}:{bind_port}")
     server.serve_forever()
+
+
+atexit.register(stop_container_logger_process)
 
 
 if __name__ == "__main__":

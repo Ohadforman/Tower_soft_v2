@@ -16,6 +16,7 @@ tmp/duckdb_auto_worker.py
 
 # Generated runtime data (keep tracked canonical files manually)
 hooks/*_PRINT.txt
+hooks/done_csv_snapshots/*.txt
 
 # Diagnostics generated artifacts (timestamped)
 reports/checks/all_checks_*.json
@@ -41,6 +42,7 @@ reports/checks/release_bundle_*/
 reports/checks/release_bundle_*.zip
 reports/checks/v2_deploy_protocol_*.json
 reports/checks/v2_deploy_protocol_*.md
+reports/dashboard_plots/
 reports/maintenance_todo/*.pdf
 reports/report_center/
 reports/weekly/tower_weekly_report_*.pdf
@@ -49,6 +51,12 @@ reports/weekly/_weekly_reports_state.json
 # Runtime activity state
 state/activity_events_log.csv
 state/activity_indicator.json
+state/dashboard_exports/
+state/full_flow_smoke_state.json
+state/manual_page_cache/
+
+# Import / migration review output
+import_reviews/
 
 # OS noise
 .DS_Store

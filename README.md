@@ -1,10 +1,51 @@
-# Tower Management Software
+# Tower Soft V2
 
-Streamlit application for optical tower operations: draw orders, process setup, consumables, schedule, maintenance, diagnostics, SQL analysis, and development tracking.
+Tower Soft V2 is the current Tower operations workspace. It contains the live data folders, support scripts, legacy Streamlit tooling, and the newer browser-based rebuild app used for deployment.
 
-## Quick Start
+The current deploy target is:
 
-1. Create/activate virtual environment and install dependencies:
+- `/Users/ohadformanair/PycharmProjects/Tower_work/tower_rebuild`
+
+That rebuild serves the app UI from `static/` and the Python API from `server.py`, while reading and writing the live Tower runtime folders in this repo.
+
+## What This Repo Contains
+
+- `tower_rebuild/`
+  The current deployable app (`server.py` + browser UI).
+- `data/`
+  Core live CSV state such as draw orders, schedule, consumables, SQL inputs, and experiment tables.
+- `data_set_csv/`
+  Full draw datasets used by SQL Lab.
+- `config/`
+  App configuration files for coatings, dies, heaters, containers, and related runtime setup.
+- `maintenance/`
+  Maintenance tasks, work packages, and fault logs.
+- `reports/`
+  Generated reports, exports, and diagnostics outputs.
+- `state/`
+  App-managed runtime state and caches.
+- `manuals/`
+  PDFs and operator manuals used by maintenance and parts flows.
+- `app/`, `renders/`, `helpers/`, `scripts/`
+  Legacy Streamlit app and supporting utilities that are still kept in the workspace.
+
+## Recommended Run Modes
+
+### 1. Rebuild app (recommended)
+
+```bash
+cd tower_rebuild
+python3 -m pip install -r requirements.txt
+python3 server.py
+```
+
+Default URL:
+
+- [http://127.0.0.1:8010/#/home](http://127.0.0.1:8010/#/home)
+
+### 2. Full repo environment
+
+Use this when you want the broader mixed workspace, including legacy Streamlit tools and supporting scripts:
 
 ```bash
 python3 -m venv .venv
@@ -12,145 +53,99 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-2. Run startup checks:
+## Dataset Save Hierarchy
 
-```bash
-python3 scripts/cli/run_preflight.py
+The full draw datasets used by SQL Lab are saved under `data_set_csv/` in the newer foldered format:
+
+```text
+data_set_csv/
+  <preform-or-draw-folder>/
+    <draw>.csv
+    <draw>_Z1/
+      <draw>_Z1.csv
+    <draw>_Z2/
+      <draw>_Z2.csv
 ```
 
-3. Start the app:
+Example:
 
-```bash
-streamlit run dash_try.py
+```text
+data_set_csv/FLOWP4045/FLOWP4045F1.csv
+data_set_csv/FLOWP4045/FLOWP4045F1_Z1/FLOWP4045F1_Z1.csv
 ```
 
-## Core Architecture
+Meaning:
 
-Entrypoint:
-- `dash_try.py`:
-  - installs legacy path compatibility (`install_legacy_path_compat(P)`)
-  - configures page/theme
-  - runs startup checks (`tests.runners.preflight.run_checks`)
-  - builds runtime (`app.bootstrap.build_runtime`)
-  - initializes navigation/session state (`app.navigation`)
-  - routes to selected tab (`app.router.render_selected_tab`)
+- the top-level CSV inside the draw folder is the full dataset
+- nested `_Z*` folders contain zone snapshots
+- SQL Lab reads the full dataset CSVs, not the zone snapshots, unless explicitly extended to do so
 
-App layers:
-- `app/`:
-  - `bootstrap.py`: startup config and runtime object
-  - `navigation.py`: grouped sidebar navigation + tab state memory
-  - `router.py`: dispatch to tab renderers
-- `app_io/`:
-  - `paths.py`: single source of truth for filesystem paths (`P`)
-  - `legacy_path_compat.py`: redirects old root filenames to current paths
-  - `path_health.py`: health report model for paths/permissions
-- `renders/tabs/`: one module per tab
-- `renders/components/`: reusable UI blocks used by tabs
-- `helpers/`: IO, schema validation, logging, formatting, and utility logic
-- `tests/runners/`: preflight, app tests, combined checks, audits
+## Where SQL Lab Reads From
 
-Detailed docs:
-- [Architecture](docs/ARCHITECTURE.md)
-- [Operations and Runbook](docs/OPERATIONS.md)
-- [Codebase Maintenance Guide](docs/CODEBASE_MAINTENANCE_GUIDE.md)
-- [Performance Notes](docs/PERFORMANCE_NOTES.md)
-- [Offline Transfer Workflow](docs/OFFLINE_TRANSFER_WORKFLOW.md)
-- [Maintenance Operator Guide](docs/MAINTENANCE_OPERATOR_GUIDE.md)
-- [Role Guide (English)](docs/APP_ROLE_GUIDE_EN.md)
-- [Role Guide (Hebrew)](docs/APP_ROLE_GUIDE_HE.md)
-- [Development Guide](docs/DEVELOPMENT.md)
-- [Environment Pretest](docs/ENV_PRETEST.md)
-- [Path Map](docs/path_map.md)
+SQL Lab reads recursively from the dataset workspace root:
 
-## Main Tabs
+- default root: `data_set_csv/`
+- one full draw CSV file = one draw
+- zone snapshot CSVs are excluded from the normal draw scan
+- maintenance and fault overlays come from the maintenance logs, not from the draw CSVs
 
-- Home
-- Schedule
-- Order Draw
-- Tower Parts
-- Consumables and dies
-- Process Setup
-- Maintenance
-- Dashboard
-- Draw Finalize
-- Data Diagnostics
-- Report Center
-- SQL Lab
-- Development Process
+## Path Management
 
-## Testing and Diagnostics
+Runtime roots can be changed from:
 
-Run full checks:
+- `Data Diagnostics -> Full path manager`
+
+Important managed roots include:
+
+- Dataset Workspace
+- Logs
+- Reports
+- Backups
+- Manuals
+- Tower containers feed / logger paths
+
+For the rebuild app, the main environment variables are:
+
+- `TOWER_REBUILD_ROOT_DIR`
+- `TOWER_REBUILD_DATA_DIR`
+- `TOWER_REBUILD_HOST`
+- `TOWER_REBUILD_PORT`
+- `TOWER_REBUILD_HELPER_PYTHON`
+- `TOWER_REBUILD_MANUAL_PAGE_MODE`
+
+## Pre-deploy Checks
+
+From the repo root:
 
 ```bash
-python3 scripts/cli/run_all_checks.py
+python3 tower_rebuild/tools/release_preflight.py
+python3 tower_rebuild/tools/network_smoke_test.py
+python3 tower_rebuild/tools/full_flow_smoke_test.py
 ```
 
-Run release readiness check (checks + backup + final READY/NOT READY):
-
-```bash
-python3 scripts/cli/run_release_check.py
-```
-
-Run environment pretest (machine/network readiness):
-
-```bash
-python3 scripts/cli/run_env_pretest.py
-```
-
-Run full health check (all checks + env + release summary):
-
-```bash
-python3 scripts/cli/run_full_health_check.py
-```
-
-Run V2 deployment protocol (go/no-go + debug hints + artifacts):
+If you are validating the legacy app side too:
 
 ```bash
 python3 scripts/cli/run_v2_deploy_protocol.py
 ```
 
-Run app tests only:
+Helpful docs:
 
-```bash
-python3 scripts/cli/run_app_tests.py
-```
+- [Architecture](docs/ARCHITECTURE.md)
+- [Operations](docs/OPERATIONS.md)
+- [V2 Deployment Protocol](docs/V2_DEPLOY_PROTOCOL.md)
+- [Path Map](docs/path_map.md)
+- [Maintenance Operator Guide](docs/MAINTENANCE_OPERATOR_GUIDE.md)
 
-Run permission/path audit:
+## Dependency Notes
 
-```bash
-python3 scripts/cli/run_path_permissions_audit.py
-```
+- `requirements.txt`
+  Full workspace environment for this repo, including legacy Streamlit tooling and rebuild support.
+- `tower_rebuild/requirements.txt`
+  Leaner dependency set for the rebuild app only.
 
-Update regression baseline snapshot:
+## Repository Notes
 
-```bash
-python3 scripts/cli/run_update_regression_snapshot.py
-```
-
-## Path Management Policy
-
-- Use `app_io.paths.P` in app code for file locations.
-- Keep files organized under folders (`data/`, `config/`, `assets/`, `state/`, `reports/`, etc.).
-- Avoid hardcoded root-level filenames in tabs/helpers.
-- Legacy root names remain supported at runtime through `install_legacy_path_compat(P)`.
-
-## DuckDB Policy (multi-user safe)
-
-- DuckDB defaults to user-local storage (`~/Library/Application Support/Tower_work` on macOS, `%LOCALAPPDATA%\\Tower_work` on Windows, `~/.local/share/Tower_work` on Linux).
-- Default mode uses one shared per-user DB filename (`tower.duckdb`) per computer/user.
-- Set `TOWER_DUCKDB_ISOLATED=1` (or `TOWER_DUCKDB_SHARED=0`) for per-process DB files (`tower_<pid>.duckdb`) when running multiple local app instances.
-- Fallback uses project `data/` only if local user dir cannot be created.
-
-## Environment Variables
-
-- `TOWER_ROOT`: override project root for all path building.
-- `TOWER_SAFE_MODE=1`: open app with limited safe tabs when startup checks fail.
-- `TOWER_DUCKDB_SHARED=1`: force shared per-user duckdb file.
-- `TOWER_DUCKDB_ISOLATED=1`: force per-process duckdb file.
-- `TOWER_LOCAL_DB_DIR`: override user-local duckdb directory.
-
-## Notes
-
-- Keep `docs/path_map.md` updated when `app_io/paths.py` changes.
-- The app expects canonical files under current folders (not repo root).
+- This repo intentionally contains live runtime folders because the app works directly against them.
+- Generated diagnostics and backup artifacts are partly ignored by `.gitignore`, but some operational data is intentionally tracked.
+- If you deploy only `tower_rebuild/`, make sure the runtime root folders (`data/`, `config/`, `maintenance/`, `data_set_csv/`, `logs/`, `reports/`, `state/`, `manuals/`) are available to it.

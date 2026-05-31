@@ -1,0 +1,28 @@
+Parameter Name,Value,Units
+=== ORDER PARAMETERS ===,,
+Order__Draw Name,TE000F1,
+Order__Draw Date,2026-05-20 06:32:16,
+Order__Order Index,19,
+Order__Preform Number,TE000,
+Order__Fiber Project,TAMAM - TIGER,
+Order__Priority,Normal,
+Order__Order Opener,OHAD,
+Order__Fiber Geometry Type,TIGER - PM,
+Order__Tiger Cut (%),21.0,%
+Order__Octagonal F2F (mm),0.0,mm
+Order__Required Length (m) (for T&M+costumer),500.0,m
+Order__Good Zones Count (required length zones),1,count
+Order__Fiber Diameter (µm),40.0,µm
+Order__Fiber Diameter Tol (± µm),0.6,µm
+Order__Main Coating Diameter (µm),83.0,µm
+Order__Main Coating Diameter Tol (± µm),1.0,µm
+Order__Secondary Coating Diameter (µm),105.0,µm
+Order__Secondary Coating Diameter Tol (± µm),5.0,µm
+Order__Tension (g),20.0,g
+Order__Draw Speed (m/min),50.0,m/min
+Order__Main Coating,DP-1032,
+Order__Secondary Coating,DS-2015,
+Order__Main Coating Temperature (°C),36.0,°C
+Order__Secondary Coating Temperature (°C),28.0,°C
+Order__Order Notes,עברית בודקים פה,
+,,

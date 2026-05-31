@@ -27,6 +27,7 @@ def apply_dataset_process_rows_to_state(df_params: pd.DataFrame, overwrite: bool
     # CSV row name -> (state_key, caster)
     mapping = {
         "Process__Entry Fiber Diameter": ("order_fiber_diam", float),
+        "Process__Furnace Temperature": ("order_furnace_temp_c", float),
         "Process__Entry Fiber Diameter Tol": ("order_fiber_diam_tol", float),
         "Process__Target First Coating Diameter": ("order_main_diam", float),
         "Process__Target First Coating Diameter Tol": ("order_main_diam_tol", float),
@@ -90,8 +91,10 @@ def apply_order_row_to_process_setup_state(order_row: dict, overwrite: bool = Tr
         "Draw Speed (m/min)": ("order_speed", float),
 
         "Fiber Geometry Type": ("order_fiber_geometry_required", str),
+        "Preform Diameter (mm)": ("process_setup_prefill_preform_diameter_mm", float),
         "Tiger Cut (%)": ("order_tiger_cut_pct", float),
         "Octagonal F2F (mm)": ("order_oct_f2f_mm", float),
+        "Furnace Temperature (°C)": ("order_furnace_temp_c", float),
 
         "Preform Number": ("process_setup_prefill_preform_number", str),
         "Fiber Project": ("process_setup_prefill_fiber_project", str),

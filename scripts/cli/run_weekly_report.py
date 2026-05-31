@@ -540,7 +540,26 @@ def _latest_containers_snapshot() -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
     last = df.tail(1).copy()
-    cols = [c for c in ["updated_at", "A_level_kg", "B_level_kg", "C_level_kg", "D_level_kg", "A_type", "B_type", "C_type", "D_type"] if c in last.columns]
+    cols = [
+        c
+        for c in [
+            "timestamp",
+            "tank1",
+            "tank2",
+            "tank3",
+            "tank4",
+            "updated_at",
+            "A_level_kg",
+            "B_level_kg",
+            "C_level_kg",
+            "D_level_kg",
+            "A_type",
+            "B_type",
+            "C_type",
+            "D_type",
+        ]
+        if c in last.columns
+    ]
     return last[cols]
 
 

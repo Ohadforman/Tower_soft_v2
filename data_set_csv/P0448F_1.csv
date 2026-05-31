@@ -1,0 +1,176 @@
+Parameter Name,Value,Units
+=== ORDER PARAMETERS ===,,
+Order__Draw Name,P0448F_1,
+Order__Draw Date,2024-07-15 08:00:00,
+Order__Order Index,,
+Order__Preform Number,P0448,
+Order__Fiber Project,R&D,
+Order__Priority,Normal,
+Order__Order Opener,,
+Order__Fiber Geometry Type,ROUND,
+Order__Tiger Cut (%),0.0,%
+Order__Octagonal F2F (mm),0.0,mm
+Order__Required Length (m) (for T&M+costumer),all,m
+Order__Good Zones Count (required length zones),1,count
+Order__Fiber Diameter (µm),200.0,µm
+Order__Main Coating Diameter (µm),275.0,µm
+Order__Secondary Coating Diameter (µm),350.0,µm
+Order__Tension (g),60.0,g
+Order__Draw Speed (m/min),35.0,m/min
+Order__Main Coating,Coating_OF_136,
+Order__Secondary Coating,,
+Order__Main Coating Temperature (°C),28.0,°C
+Order__Secondary Coating Temperature (°C),28.0,°C
+Order__Order Notes,200,
+,,
+=== PROCESS SETUP ===,,
+Process__Process Setup Timestamp,2024-07-15 08:00:00,
+Process__Preform Diameter,15.35,mm
+Process__Preform Shape,Circular,
+Process__Octagonal Preform,0,bool
+Process__Octagonal F2F,0.0,mm
+Process__Tiger Preform,0,bool
+Process__Tiger Cut,0.0,%
+Process__PM Iris System,0,bool
+Process__Iris Mode,Manual,
+Process__Base Area,185.05747875511526,mm^2
+Process__Adjusted Area,185.05747875511526,mm^2
+Process__Effective Preform Diameter,15.35,mm
+Process__Selected Iris Diameter,22.5,mm
+Process__Iris Gap Area,212.55034146484292,mm^2
+Process__Entry Fiber Diameter,200.0,µm
+Process__Target First Coating Diameter,275.0,µm
+Process__Target Second Coating Diameter,350.0,µm
+Process__First Coating Diameter (Theoretical),275.0,µm
+Process__Second Coating Diameter (Theoretical),350.0,µm
+Process__Primary Coating,Coating_OF_136,
+Process__Secondary Coating,,
+Process__Primary Coating Temperature,28.0,°C
+Process__Secondary Coating Temperature,28.0,°C
+Process__Primary Die Diameter,,µm
+Process__Secondary Die Diameter,,µm
+Process__Primary Die Name,,
+Process__Secondary Die Name,,
+Process__Coating Die Selection Mode,Legacy Import,
+Process__Draw Speed,35.0,m/min
+Process__P Gain (Diameter Control),,
+Process__I Gain (Diameter Control),,
+Process__TF Mode,Winder,
+Process__Increment TF Value,,
+Process__Selected Drum,,
+,,
+=== LOGS DATA SECTION ===,,
+,,
+### DASHBOARD ZONES,,
+,,
+Zones Saved Timestamp,2024-07-15 08:00:00,
+Dashboard Log File,,
+Good Zones Count,2,count
+Good Zones X Column,Fibre Length,
+Zone 1 | Start,0.377,index/label
+Zone 1 | End,1.89,index/label
+Zone 1 | Bare Fibre Diameter | Avg,200.0,
+Zone 1 | Bare Fibre Diameter | Min,200.0,
+Zone 1 | Bare Fibre Diameter | Max,200.0,
+Zone 1 | Capstan Speed | Avg,35.31,
+Zone 1 | Capstan Speed | Min,35.31,
+Zone 1 | Capstan Speed | Max,35.31,
+Zone 1 | Tension N | Avg,60.69,g
+Zone 1 | Tension N | Min,60.69,g
+Zone 1 | Tension N | Max,60.69,g
+Zone 1 | Furnace DegC Actual | Avg,2090.0,
+Zone 1 | Furnace DegC Actual | Min,2090.0,
+Zone 1 | Furnace DegC Actual | Max,2090.0,
+Zone 1 | Furnace DegC Set | Avg,2090.0,
+Zone 1 | Furnace DegC Set | Min,2090.0,
+Zone 1 | Furnace DegC Set | Max,2090.0,
+Zone 1 | Fibre Length | Avg,1.1335,
+Zone 1 | Fibre Length | Min,0.377,
+Zone 1 | Fibre Length | Max,1.89,
+Zone 1 | Coated Inner Diameter | Avg,275.0,
+Zone 1 | Coated Inner Diameter | Min,275.0,
+Zone 1 | Coated Inner Diameter | Max,275.0,
+Zone 1 | Coated Outer Diameter | Avg,350.0,
+Zone 1 | Coated Outer Diameter | Min,350.0,
+Zone 1 | Coated Outer Diameter | Max,350.0,
+Zone 1 | Pf Process Position | Avg,214.82,
+Zone 1 | Pf Process Position | Min,87.28,
+Zone 1 | Pf Process Position | Max,342.36,
+Good Zone 1 (km from end) Start,0.6719999999999999,km
+Good Zone 1 (km from end) End,2.1849999999999996,km
+Good Zone 1 Length,1.5129999999999997,km
+Good Zone 1 Fibre Length Min,0.377,km
+Good Zone 1 Fibre Length Max,1.89,km
+Zone 2 | Start,2.122,index/label
+Zone 2 | End,2.496,index/label
+Zone 2 | Bare Fibre Diameter | Avg,200.0,
+Zone 2 | Bare Fibre Diameter | Min,200.0,
+Zone 2 | Bare Fibre Diameter | Max,200.0,
+Zone 2 | Capstan Speed | Avg,35.31,
+Zone 2 | Capstan Speed | Min,35.31,
+Zone 2 | Capstan Speed | Max,35.31,
+Zone 2 | Tension N | Avg,60.69,g
+Zone 2 | Tension N | Min,60.69,g
+Zone 2 | Tension N | Max,60.69,g
+Zone 2 | Furnace DegC Actual | Avg,2090.0,
+Zone 2 | Furnace DegC Actual | Min,2090.0,
+Zone 2 | Furnace DegC Actual | Max,2090.0,
+Zone 2 | Furnace DegC Set | Avg,2090.0,
+Zone 2 | Furnace DegC Set | Min,2090.0,
+Zone 2 | Furnace DegC Set | Max,2090.0,
+Zone 2 | Fibre Length | Avg,2.309,
+Zone 2 | Fibre Length | Min,2.122,
+Zone 2 | Fibre Length | Max,2.496,
+Zone 2 | Coated Inner Diameter | Avg,275.0,
+Zone 2 | Coated Inner Diameter | Min,275.0,
+Zone 2 | Coated Inner Diameter | Max,275.0,
+Zone 2 | Coated Outer Diameter | Avg,350.0,
+Zone 2 | Coated Outer Diameter | Min,350.0,
+Zone 2 | Coated Outer Diameter | Max,350.0,
+Zone 2 | Pf Process Position | Avg,412.68,
+Zone 2 | Pf Process Position | Min,381.47,
+Zone 2 | Pf Process Position | Max,443.89,
+Good Zone 2 (km from end) Start,0.06599999999999984,km
+Good Zone 2 (km from end) End,0.43999999999999995,km
+Good Zone 2 Length,0.3740000000000001,km
+Good Zone 2 Fibre Length Min,2.122,km
+Good Zone 2 Fibre Length Max,2.496,km
+,,
+,,
+### WINDER & LENGTH,,
+,,
+Drum | Selected,,
+Fiber Length | End (log end),2.562,km
+Zone 1 | Fiber Length | Min,0.377,km
+Zone 1 | Fiber Length | Max,1.89,km
+Zone 2 | Fiber Length | Min,2.122,km
+Zone 2 | Fiber Length | Max,2.496,km
+,,
+—,—,
+CUT/SAVE Plan Source,P0448F_1.csv,
+AUTO Plan Mode,Legacy import from cuts/good fiber,
+Zone Length Column (log),Fibre Length,
+Fiber Length End (log end),2.562,km
+Fiber Length Min (log),0.0,km
+Fiber Length Max (log),2.562,km
+T&M Coordinate System,km_from_end = (L_end - FibreLength),
+Good Zones Order,Ordered from spool end → toward start,
+T&M Step 1 Action,CUT,
+T&M Step 1 Length,0.061,km
+T&M Step 2 Action,SAVE,
+T&M Step 2 Length,0.374,km
+T&M Step 2 Zone,Good Zone 1,
+T&M Step 2 Fibre Length Min,0.377,km
+T&M Step 2 Fibre Length Max,1.89,km
+T&M Step 3 Action,CUT,
+T&M Step 3 Length,0.232,km
+T&M Step 4 Action,SAVE,
+T&M Step 4 Length,1.513,km
+T&M Step 4 Zone,Good Zone 2,
+T&M Step 4 Fibre Length Min,2.122,km
+T&M Step 4 Fibre Length Max,2.496,km
+Total Saved Length,1.887,km
+Total Cut Length,0.29300000000000004,km
+Preform Length After Draw,454.35,cm
+Done Description,"232 fiber wasa involved in handle entering in furnace, BLM1-2 ratio below +/- 0.5, Tn in this part 59.32g, Avrage drawing speed was 35.32 m/min",
+Done Timestamp,2024-07-15 08:00:00,
