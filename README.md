@@ -149,3 +149,31 @@ Helpful docs:
 - This repo intentionally contains live runtime folders because the app works directly against them.
 - Generated diagnostics and backup artifacts are partly ignored by `.gitignore`, but some operational data is intentionally tracked.
 - If you deploy only `tower_rebuild/`, make sure the runtime root folders (`data/`, `config/`, `maintenance/`, `data_set_csv/`, `logs/`, `reports/`, `state/`, `manuals/`) are available to it.
+
+## Release Notes
+
+### v2.0.0
+
+This release is the first clean Tower Soft V2 snapshot prepared for the new repository.
+
+Included in this release:
+
+- the rebuild app in `tower_rebuild/`
+- the updated repo-root setup and dependency docs
+- foldered `data_set_csv/` hierarchy for full draw datasets and zone snapshots
+- SQL Lab / maintenance / consumables / draw-finalize changes from the current V2 app line
+- migration and smoke-test tooling used to validate save paths and deploy readiness
+
+Intentionally not bundled as part of the curated release snapshot:
+
+- volatile runtime churn such as active logs, caches, transient exports, and backup byproducts
+- smoke-only generated dataset folders used just for verification
+- machine-local temporary outputs that are not part of the intended source snapshot
+
+Recommended release verification:
+
+```bash
+python3 tower_rebuild/tools/release_preflight.py
+python3 tower_rebuild/tools/network_smoke_test.py
+python3 tower_rebuild/tools/full_flow_smoke_test.py
+```
