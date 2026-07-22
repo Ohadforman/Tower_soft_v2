@@ -1,18 +1,26 @@
 {
-    "A": {
-        "level": 2.4,
-        "type": "DP-1032"
-    },
-    "B": {
-        "level": 2.1,
-        "type": "DS-2015"
-    },
-    "C": {
-        "level": 0.7,
-        "type": "Coating_OF_136"
-    },
-    "D": {
-        "level": 3.0,
-        "type": "Coating_KS_2-002"
-    }
+  "A": {
+    "type": "DP-1032",
+    "sensor_column": "tank1",
+    "diameter_mm": 280.0,
+    "fill_height_mm": 300.0
+  },
+  "B": {
+    "type": "DS-2015",
+    "sensor_column": "tank2",
+    "diameter_mm": 280.0,
+    "fill_height_mm": 300.0
+  },
+  "C": {
+    "type": "Coating_OF_136",
+    "sensor_column": "tank3",
+    "diameter_mm": 280.0,
+    "fill_height_mm": 300.0
+  },
+  "D": {
+    "type": "Coating_KS_2-002",
+    "sensor_column": "tank4",
+    "diameter_mm": 280.0,
+    "fill_height_mm": 300.0
+  }
 }

@@ -1,9 +1,17 @@
 {
-    "main_container_heater_temp": 44.0,
-    "secondary_container_heater_temp": 0.0,
-    "main_pipe_heater_temp": 0.0,
-    "secondary_pipe_heater_temp": 0.0,
-    "die_holder_heater_temp_c": 44.0,
-    "die_holder_primary_temp_c": 44.0,
-    "die_holder_secondary_temp_c": 0.0
+  "main_container_heater_temp": 44.0,
+  "secondary_container_heater_temp": 0.0,
+  "main_pipe_heater_temp": 0.0,
+  "secondary_pipe_heater_temp": 0.0,
+  "die_holder_heater_temp_c": 43.0,
+  "die_holder_primary_temp_c": 43.0,
+  "die_holder_secondary_temp_c": 28.0,
+  "A_container_c": 27.0,
+  "A_pipe_c": 27.0,
+  "B_container_c": 26.0,
+  "B_pipe_c": 26.0,
+  "C_container_c": 25.0,
+  "C_pipe_c": 25.0,
+  "D_container_c": 25.0,
+  "D_pipe_c": 25.0
 }

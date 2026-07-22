@@ -1,0 +1,117 @@
+Parameter Name,Value,Units
+=== ORDER PARAMETERS ===,,
+Order__Draw Name,FLOWP1555F1,
+Order__Draw Date,2026-05-28 14:15:58,
+Order__Order Index,27,
+Order__Preform Number,FLOWP1555,
+Order__Fiber Project,Full Flow Smoke 20260528141555,
+Order__Priority,Normal,
+Order__Order Opener,Codex,
+Order__Fiber Geometry Type,ROUND,
+Order__Preform Diameter (mm),16.0,mm
+Order__Tiger Cut (%),0.0,%
+Order__Octagonal F2F (mm),0.0,mm
+Order__Required Length (m) (for T&M+costumer),1250.0,m
+Order__Good Zones Count (required length zones),2,count
+Order__Fiber Diameter (µm),125.0,µm
+Order__Fiber Diameter Tol (± µm),1.0,µm
+Order__Main Coating Diameter (µm),245.0,µm
+Order__Main Coating Diameter Tol (± µm),2.0,µm
+Order__Secondary Coating Diameter (µm),400.0,µm
+Order__Secondary Coating Diameter Tol (± µm),3.0,µm
+Order__Tension (g),35.0,g
+Order__Draw Speed (m/min),5.0,m/min
+Order__Furnace Temperature (°C),2120.0,°C
+Order__Main Coating,UV Main,
+Order__Secondary Coating,UV Secondary,
+Order__Main Coating Temperature (°C),62.0,°C
+Order__Secondary Coating Temperature (°C),58.0,°C
+Order__Order Notes,Full flow test 20260528141555,
+,,
+=== PROCESS SETUP ===,,
+Process__Process Setup Timestamp,2026-05-28 14:15:59,
+Process__Preform Shape,ROUND,
+Process__Preform Diameter,63,mm
+Process__Octagonal Preform,0,bool
+Process__Tiger Preform,0,bool
+Process__PM Iris System,0,bool
+Process__Iris Mode,Manual,
+Process__Base Area,3117.245,mm^2
+Process__Adjusted Area,3117.245,mm^2
+Process__Effective Preform Diameter,63,mm
+Process__Selected Iris Diameter,14.2,mm
+Process__Iris Gap Area,158.4,mm^2
+Process__Entry Fiber Diameter,125,µm
+Process__Target First Coating Diameter,245,µm
+Process__Target Second Coating Diameter,400,µm
+Process__Primary Coating,UV Main,
+Process__Secondary Coating,UV Secondary,
+Process__Primary Coating Temperature,62,°C
+Process__Secondary Coating Temperature,58,°C
+Process__Primary Die Name,D1,
+Process__Secondary Die Name,D2,
+Process__Coating Die Selection Mode,Auto,
+Process__Draw Speed,5,m/min
+Process__P Gain (Diameter Control),1.2,
+Process__I Gain (Diameter Control),0.4,
+Process__TF Mode,Auto,
+Process__Increment TF Value,0.02,mm
+Process__Selected Drum,Drum-A,
+,,
+—,—,
+Dashboard Log File,NetworkCopy_Training_network_smoke_raw.csv,
+Good Zones Count,2,count
+Good Zones X Column,Bare Fibre Diameter,
+Zone 1 | Start,125.0,Bare Fibre Diameter
+Zone 1 | End,125.15,Bare Fibre Diameter
+Zone 1 | Length span,2.0,km
+Zone 1 | Bare Fibre Diameter | Avg,125.08780487804879,
+Zone 1 | Bare Fibre Diameter | Min,125.0,
+Zone 1 | Bare Fibre Diameter | Max,125.18,
+Zone 1 | Furnace DegC Actual | Avg,2109.0,
+Zone 1 | Furnace DegC Actual | Min,2100.0,
+Zone 1 | Furnace DegC Actual | Max,2118.0,
+Zone 1 | Fibre Length | Avg,1.0,
+Zone 1 | Fibre Length | Min,0.0,
+Zone 1 | Fibre Length | Max,2.0,
+Zone 1 | UV 1 Intensity | Avg,82.39024390243902,
+Zone 1 | UV 1 Intensity | Min,82.0,
+Zone 1 | UV 1 Intensity | Max,82.8,
+Zone 1 | Furnace MFC1 Actual | Avg,1.173170731707317,
+Zone 1 | Furnace MFC1 Actual | Min,1.1,
+Zone 1 | Furnace MFC1 Actual | Max,1.25,
+Zone 1 | Good Fibre State | Avg,0.7560975609756098,
+Zone 1 | Good Fibre State | Min,0.0,
+Zone 1 | Good Fibre State | Max,1.0,
+Zone 1 | Trend Marker | Avg,0.024390243902439025,
+Zone 1 | Trend Marker | Min,0.0,
+Zone 1 | Trend Marker | Max,1.0,
+,,
+Zone 2 | Start,125.18,Bare Fibre Diameter
+Zone 2 | End,125.09,Bare Fibre Diameter
+Zone 2 | Length span,1.9500000000000002,km
+Zone 2 | Bare Fibre Diameter | Avg,125.08775,
+Zone 2 | Bare Fibre Diameter | Min,125.0,
+Zone 2 | Bare Fibre Diameter | Max,125.18,
+Zone 2 | Furnace DegC Actual | Avg,2127.225,
+Zone 2 | Furnace DegC Actual | Min,2118.45,
+Zone 2 | Furnace DegC Actual | Max,2136.0,
+Zone 2 | Fibre Length | Avg,3.025,
+Zone 2 | Fibre Length | Min,2.05,
+Zone 2 | Fibre Length | Max,4.0,
+Zone 2 | UV 1 Intensity | Avg,82.4,
+Zone 2 | UV 1 Intensity | Min,82.0,
+Zone 2 | UV 1 Intensity | Max,82.8,
+Zone 2 | Furnace MFC1 Actual | Avg,1.175,
+Zone 2 | Furnace MFC1 Actual | Min,1.1,
+Zone 2 | Furnace MFC1 Actual | Max,1.25,
+Zone 2 | Good Fibre State | Avg,1.0,
+Zone 2 | Good Fibre State | Min,1.0,
+Zone 2 | Good Fibre State | Max,1.0,
+Zone 2 | Trend Marker | Avg,0.025,
+Zone 2 | Trend Marker | Min,0.0,
+Zone 2 | Trend Marker | Max,1.0,
+,,
+Done Description,Full flow done description,
+Done Timestamp,2026-05-28 14:16:15,
+Preform Length After Draw,111.1,cm

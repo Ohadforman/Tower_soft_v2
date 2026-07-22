@@ -1,0 +1,29 @@
+Parameter Name,Value,Units
+=== ORDER PARAMETERS ===,,
+Order__Draw Name,NETP9123F1,
+Order__Draw Date,2026-05-26 21:01:54,
+Order__Preform Number,NETP9123,
+Order__Fiber Project,Network Smoke Project 210123,
+Order__Priority,Normal,
+Order__Order Opener,Codex,
+Order__Fiber Geometry Type,Round,
+Order__Preform Diameter (mm),,mm
+Order__Tiger Cut (%),,%
+Order__Octagonal F2F (mm),,mm
+Order__Required Length (m) (for T&M+costumer),1200,m
+Order__Good Zones Count (required length zones),1,count
+Order__Fiber Diameter (µm),,µm
+Order__Fiber Diameter Tol (± µm),,µm
+Order__Main Coating Diameter (µm),,µm
+Order__Main Coating Diameter Tol (± µm),,µm
+Order__Secondary Coating Diameter (µm),,µm
+Order__Secondary Coating Diameter Tol (± µm),,µm
+Order__Tension (g),,g
+Order__Draw Speed (m/min),,m/min
+Order__Furnace Temperature (°C),,°C
+Order__Main Coating,,
+Order__Secondary Coating,,
+Order__Main Coating Temperature (°C),,°C
+Order__Secondary Coating Temperature (°C),,°C
+Order__Order Notes,Network smoke dataset,
+,,

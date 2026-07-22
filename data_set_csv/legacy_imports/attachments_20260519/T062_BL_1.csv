@@ -1,0 +1,122 @@
+Parameter Name,Value,Units
+=== ORDER PARAMETERS ===,,
+Order__Draw Name,T062_BL_1,
+Order__Draw Date,2025-09-30 08:21:21.377323,
+Order__Order Index,,
+Order__Preform Number,T062_BL_1,
+Order__Fiber Project,TAMAM - TIGER,
+Order__Priority,Normal,
+Order__Order Opener,,
+Order__Fiber Geometry Type,TIGER - PM,
+Order__Tiger Cut (%),15,%
+Order__Octagonal F2F (mm),0.0,mm
+Order__Required Length (m) (for T&M+costumer),,m
+Order__Good Zones Count (required length zones),1,count
+Order__Fiber Diameter (µm),40,µm
+Order__Main Coating Diameter (µm),80.0,µm
+Order__Secondary Coating Diameter (µm),110.0,µm
+Order__Tension (g),20.0,g
+Order__Draw Speed (m/min),50.0,m/min
+Order__Main Coating,DP-1032,
+Order__Secondary Coating,DS-2015,
+Order__Main Coating Temperature (°C),45,°C
+Order__Secondary Coating Temperature (°C),36,°C
+Order__Order Notes,,
+,,
+=== PROCESS SETUP ===,,
+Process__Process Setup Timestamp,2025-09-30 08:21:21.377323,
+Process__Preform Diameter,17,mm
+Process__Preform Shape,Tiger Cut,
+Process__Octagonal Preform,0,bool
+Process__Octagonal F2F,,mm
+Process__Tiger Preform,1,bool
+Process__Tiger Cut,15,%
+Process__PM Iris System,1,bool
+Process__Iris Mode,PM Auto,
+Process__Base Area,,mm^2
+Process__Adjusted Area,,mm^2
+Process__Effective Preform Diameter,,mm
+Process__Selected Iris Diameter,22.5,mm
+Process__Iris Gap Area,,mm^2
+Process__Entry Fiber Diameter,40,µm
+Process__Target First Coating Diameter,,µm
+Process__Target Second Coating Diameter,,µm
+Process__First Coating Diameter (Theoretical),93.0386083853,µm
+Process__Second Coating Diameter (Theoretical),111.0038935192,µm
+Process__Primary Coating,DP-1032,
+Process__Secondary Coating,DS-2015,
+Process__Primary Coating Temperature,45,°C
+Process__Secondary Coating Temperature,36,°C
+Process__Primary Die Diameter,160,µm
+Process__Secondary Die Diameter,130,µm
+Process__Primary Die Name,Die_160,
+Process__Secondary Die Name,Die_130,
+Process__Coating Die Selection Mode,Auto,
+Process__Draw Speed,,m/min
+Process__P Gain (Diameter Control),0.4,
+Process__I Gain (Diameter Control),1,
+Process__TF Mode,Winder,
+Process__Increment TF Value,0.129,mm
+Process__Selected Drum,,
+,,
+=== LOGS DATA SECTION ===,,
+,,
+### DASHBOARD ZONES,,
+,,
+Zones Saved Timestamp,2025-09-30 08:21:21.377323,
+Dashboard Log File,T062_BL_1_30092025_111324.csv,
+Good Zones Count,1,count
+Good Zones X Column,Fibre Length,
+Zone 1 | Start,2025-09-30 10:59:29.440000,index/label
+Zone 1 | End,2025-09-30 11:01:48.440000,index/label
+Zone 1 | Bare Fibre Diameter | Avg,40.07,µm
+Zone 1 | Bare Fibre Diameter | Max,40.6,µm
+Zone 1 | Bare Fibre Diameter | Min,39.1,µm
+Zone 1 | Capstan Speed | Avg,92.97,m/min
+Zone 1 | Capstan Speed | Max,99.65,m/min
+Zone 1 | Capstan Speed | Min,85.54,m/min
+Zone 1 | Coated Inner Diameter | Avg,97.56,µm
+Zone 1 | Coated Inner Diameter | Max,98.3,µm
+Zone 1 | Coated Inner Diameter | Min,96.9,µm
+Zone 1 | Coated Outer Diameter | Avg,116.55,µm
+Zone 1 | Coated Outer Diameter | Max,118,µm
+Zone 1 | Coated Outer Diameter | Min,116,µm
+Zone 1 | Furnace DegC Actual | Avg,2250.05,C
+Zone 1 | Furnace DegC Actual | Max,2250.2,C
+Zone 1 | Furnace DegC Actual | Min,2249.26,C
+Zone 1 | Tension N | Avg,-0.12,g
+Zone 1 | Tension N | Max,-0.08,g
+Zone 1 | Tension N | Min,-0.15,g
+,,
+,,
+### WINDER & LENGTH,,
+,,
+Drum | Selected,,
+Fiber Length | End (log end),1.49,km
+Zone 1 | Fiber Length | Min,1.14,km
+Zone 1 | Fiber Length | Max,1.35,km
+,,
+—,—,
+CUT/SAVE Plan Source,T062_BL_1.csv,
+AUTO Plan Mode,,
+Zone Length Column (log),Fibre Length,
+Fiber Length End (log end),1.49,km
+Fiber Length Min (log),,km
+Fiber Length Max (log),1.49,km
+T&M Coordinate System,,
+Good Zones Order,,
+Good Zone 1 (km from end) Start,0.14,km
+Good Zone 1 (km from end) End,0.35,km
+Good Zone 1 Length,0.21,km
+Good Zone 1 Fibre Length Min,1.14,km
+Good Zone 1 Fibre Length Max,1.35,km
+T&M Step 1 Action,CUT,
+T&M Step 1 Length,0.14,km
+T&M Step 2 Action,SAVE,
+T&M Step 2 Length,0.21,km
+T&M Step 2 Zone,Good Zone 1,
+Total Saved Length,0.21,km
+Total Cut Length,0.14,km
+Preform Length After Draw,,cm
+Done Description,,
+Done Timestamp,,

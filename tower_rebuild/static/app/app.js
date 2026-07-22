@@ -4,6 +4,11 @@ let partsManualIndexCache = null;
 let partsManualIndexPromise = null;
 let orderDrawFlash = null;
 let maintenanceStageFlash = null;
+let drawFinalizeFlash = null;
+let globalPressFeedbackBound = false;
+let consumablesLivePollTimer = null;
+let consumablesLivePollInFlight = false;
+const CONSUMABLES_LIVE_POLL_INTERVAL_MS = 10000;
 const DEFAULT_HOME_PANEL = "draws";
 const HOME_PANELS = [
   { key: "draws", title: "Draws", shortTitle: "Draws", eyebrow: "Live draw orders", detailLabel: "Active", position: "pos-a" },
@@ -77,6 +82,12 @@ function escapeHtml(value) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+function sanitizeAttachmentPath(value) {
+  return String(value || "")
+    .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
+    .trim();
 }
 
 function toneForLabel(label) {
@@ -449,6 +460,202 @@ function consumablesCoatingGuideMarkup(rows) {
   `;
 }
 
+function consumablesContainerEditorMarkup(data) {
+  const rows = Array.isArray(data?.container_editor_rows) ? data.container_editor_rows : [];
+  const sensorOptions = Array.isArray(data?.container_sensor_options) ? data.container_sensor_options : [];
+  const coatingOptions = Array.isArray(data?.coating_type_options) ? data.coating_type_options : [];
+  const sharedDiameter = Number(data?.container_shared_diameter_mm || rows?.[0]?.diameter_mm || 0);
+  const loggerStatus = data?.container_logger || {};
+  const loggerTone = String(loggerStatus.state || "").trim() === "running" ? "good" : "warn";
+  const loggerMessage = String(loggerStatus.message || "").trim();
+  if (!rows.length) {
+    return `<div class="chart-empty">No live container setup rows.</div>`;
+  }
+  return `
+    <form id="consumables-containers-form" class="consumables-container-form">
+      <div class="micro-panel consumables-container-note">
+        Point <strong>Tower Containers CSV</strong> from Data Diagnostics to the Arduino feed with columns <strong>timestamp</strong>, <strong>tank1</strong>, <strong>tank2</strong>, <strong>tank3</strong>, <strong>tank4</strong>. The app-managed logger writes the first real sample as soon as live tank data arrives, then keeps logging in the background while the app is running. This setup only maps the coating type, CSV source column, and shared container diameter.
+        ${loggerMessage ? `<div class="consumables-container-status tone-${loggerTone}">${escapeHtml(loggerMessage)}</div>` : ""}
+      </div>
+      <datalist id="consumables-coating-type-list">
+        ${coatingOptions.map((item) => `<option value="${escapeHtml(item)}"></option>`).join("")}
+      </datalist>
+      <div class="consumables-container-shared">
+        <label class="field-block consumables-container-shared-field">
+          <span>Shared container diameter (mm)</span>
+          <input type="number" name="container_shared_diameter" value="${sharedDiameter > 0 ? sharedDiameter.toFixed(1) : ""}" step="0.1" />
+        </label>
+      </div>
+      <div class="consumables-container-editor">
+        ${rows
+          .map(
+            (item, index) => {
+              const liveState = String(item.live_state || "live").trim() || "live";
+              const isLive = liveState === "live";
+              const liveHeadline = isLive ? `${Number(item.level_kg || 0).toFixed(1)} kg live` : liveState === "stale" ? "Feed stale" : "Disconnected";
+              const liveDetail = isLive
+                ? `${Number(item.fill_percent || 0).toFixed(1)}% fill · ${Number(item.volume_l || 0).toFixed(1)} L from ${escapeHtml(item.sensor_column || "")}`
+                : `${escapeHtml(item.updated_at || "No live sample yet")} · waiting for ${escapeHtml(item.sensor_column || "tank feed")}`;
+              return `
+              <div class="consumables-container-row">
+                <input type="hidden" name="container_label_${index}" value="${escapeHtml(item.label || "")}" />
+                <div class="consumables-container-label">
+                  <strong>Station ${escapeHtml(item.label || "")}</strong>
+                  <span>${escapeHtml(item.updated_at || "No live sample yet")}</span>
+                </div>
+                <label class="field-block">
+                  <span>Coating type in container</span>
+                  <input type="text" name="container_type_${index}" value="${escapeHtml(item.type || "")}" list="consumables-coating-type-list" placeholder="DP-1032" />
+                </label>
+                <label class="field-block">
+                  <span>CSV column</span>
+                  <select name="container_sensor_${index}">
+                    ${sensorOptions
+                      .map(
+                        (sensor) =>
+                          `<option value="${escapeHtml(sensor)}" ${sensor === item.sensor_column ? "selected" : ""}>${escapeHtml(sensor)}</option>`,
+                      )
+                      .join("")}
+                  </select>
+                </label>
+                <div class="micro-panel consumables-container-live">
+                  <strong>${liveHeadline}</strong>
+                  <p>${liveDetail}</p>
+                </div>
+              </div>
+            `;
+            },
+          )
+          .join("")}
+      </div>
+      <div class="order-builder-actions">
+        <button class="action-btn action-primary" type="submit">Save live fill setup</button>
+      </div>
+    </form>
+  `;
+}
+
+function consumablesCoatingEditorMarkup(rows) {
+  const safeRows = Array.isArray(rows) ? rows : [];
+  if (!safeRows.length) {
+    return `<div class="chart-empty">No coating rows to edit.</div>`;
+  }
+  return `
+    <form id="consumables-coatings-form" class="consumables-coating-form">
+      <div class="micro-panel consumables-coating-note">
+        Update the operator coating data here. This saves only the coating guide fields in <strong>config_coating.json</strong>: description, density, viscosity, and RI.
+      </div>
+      <div class="consumables-coating-editor">
+        ${safeRows
+          .map(
+            (item, index) => `
+              <div class="consumables-coating-edit-row tone-${item.tone || "neutral"}">
+                <input type="hidden" name="coating_label_${index}" value="${escapeHtml(item.label || "")}" />
+                <div class="consumables-coating-edit-meta">
+                  <div class="consumables-coating-edit-head">
+                    <strong>${escapeHtml(item.label || "Unnamed coating")}</strong>
+                    <span>${item.in_config ? "Saved coating config" : "Will create coating config entry"}</span>
+                  </div>
+                  <div class="consumables-coating-edit-stock">
+                    <b>${Number(item.stock_kg || 0).toFixed(1)} kg total</b>
+                    <span>Warehouse ${Number(item.warehouse_kg || 0).toFixed(1)} kg</span>
+                    <span>Loaded ${Number(item.loaded_kg || 0).toFixed(1)} kg</span>
+                    <span>Min ${Number(item.min_stock_kg || 0).toFixed(1)} kg</span>
+                  </div>
+                </div>
+                <label class="field-block consumables-coating-description">
+                  <span>Description</span>
+                  <textarea name="coating_description_${index}" rows="3" placeholder="Operator note, usage, or coating purpose">${escapeHtml(item.description || "")}</textarea>
+                </label>
+                <div class="consumables-coating-edit-fields">
+                  <label class="field-block">
+                    <span>Density</span>
+                    <input type="text" name="coating_density_${index}" value="${escapeHtml(item.density ?? "")}" placeholder="e.g. 1.05e3" />
+                  </label>
+                  <label class="field-block">
+                    <span>Viscosity</span>
+                    <input type="text" name="coating_viscosity_${index}" value="${escapeHtml(item.viscosity ?? "")}" placeholder="e.g. 2.2" />
+                  </label>
+                  <label class="field-block">
+                    <span>RI</span>
+                    <input type="text" name="coating_ri_${index}" value="${escapeHtml(item.refractive_index ?? "")}" placeholder="e.g. 1.4" />
+                  </label>
+                </div>
+              </div>
+            `,
+          )
+          .join("")}
+      </div>
+      <div class="order-builder-actions">
+        <button class="action-btn action-primary" type="submit">Save coating guide</button>
+      </div>
+    </form>
+  `;
+}
+
+function consumablesStockEditorMarkup(rows) {
+  const safeRows = Array.isArray(rows) ? rows : [];
+  return `
+    <form id="consumables-stock-form" class="consumables-stock-form">
+      <div class="micro-panel consumables-stock-note">
+        Total inventory here is <strong>warehouse + loaded containers</strong>. Update the warehouse kg, set a minimum stock threshold, or remove a warehouse line when it is no longer kept in storage.
+      </div>
+      <div class="consumables-stock-editor">
+        ${safeRows
+          .map(
+            (item, index) => `
+              <div class="consumables-stock-row tone-${item.tone || "neutral"}">
+                <input type="hidden" name="stock_label_${index}" value="${escapeHtml(item.label || "")}" />
+                <div class="consumables-stock-label">
+                  <strong>${escapeHtml(item.label || "Unnamed coating")}</strong>
+                  <span>${item.in_config ? "Known coating type" : "Custom live stock type"}</span>
+                </div>
+                <label class="field-block consumables-stock-value">
+                  <span>Warehouse kg</span>
+                  <input type="number" name="stock_value_${index}" value="${Number(item.value || 0).toFixed(1)}" step="0.1" />
+                </label>
+                <label class="field-block consumables-stock-value">
+                  <span>Min stock kg</span>
+                  <input type="number" name="stock_min_${index}" value="${Number(item.min_stock_kg || 0).toFixed(1)}" step="0.1" />
+                </label>
+                <div class="micro-panel consumables-stock-meta">
+                  <strong>${Number(item.total_kg || 0).toFixed(1)} kg total inventory</strong>
+                  <p>Warehouse ${Number(item.value || 0).toFixed(1)} kg · Loaded now ${Number(item.loaded_kg || 0).toFixed(1)} kg · Min ${Number(item.min_stock_kg || 0).toFixed(1)} kg</p>
+                  <label class="consumables-stock-remove">
+                    <input type="checkbox" name="stock_remove_${index}" />
+                    <span>Remove from warehouse</span>
+                  </label>
+                </div>
+              </div>
+            `,
+          )
+          .join("")}
+        <div class="consumables-stock-row is-add">
+          <label class="field-block">
+            <span>New coating type</span>
+            <input type="text" name="new_stock_label" placeholder="Coating_XYZ" />
+          </label>
+          <label class="field-block consumables-stock-value">
+            <span>Warehouse kg</span>
+            <input type="number" name="new_stock_value" value="" step="0.1" placeholder="0.0" />
+          </label>
+          <label class="field-block consumables-stock-value">
+            <span>Min stock kg</span>
+            <input type="number" name="new_stock_min" value="1.0" step="0.1" />
+          </label>
+          <div class="micro-panel consumables-stock-meta">
+            <strong>Add one extra live stock line</strong>
+            <p>Leave this blank if you are only updating the existing coating amounts and thresholds.</p>
+          </div>
+        </div>
+      </div>
+      <div class="order-builder-actions">
+        <button class="action-btn action-primary" type="submit">Save stock values</button>
+      </div>
+    </form>
+  `;
+}
+
 function collapsibleSection(title, content, options = {}) {
   const {
     kind = "default",
@@ -668,16 +875,13 @@ function partsStageActionDrawerMarkup(stageKey, stageLabel, items, actionState, 
         <div class="micro-row"><span>Orders</span><strong>${drawerItems.length}</strong></div>
       </div>
       <div class="maintenance-prep-actiondrawer-detail">
-        <div class="field-grid field-grid-2">
+        <div class="field-grid parts-drawer-target-grid">
           <label class="field-block">
             <span>Target step</span>
             <select name="targetStatus" data-parts-target-select>
               ${targetOptions.map((option) => `<option value="${escapeHtml(option.value)}"${option.value === defaultTarget ? " selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}
             </select>
           </label>
-          <div class="maintenance-prep-actiondrawer-stepnote" data-parts-drawer-stepnote>
-            <p data-parts-drawer-steptext>Choose the furthest step you want. Only the fields needed for that move stay open.</p>
-          </div>
         </div>
         <div class="field-grid field-grid-2" data-parts-drawer-section-group="wait-for-approval">
           <label class="field-block" data-parts-drawer-section="wait-for-approval">
@@ -755,6 +959,14 @@ function partsStageActionDrawerMarkup(stageKey, stageLabel, items, actionState, 
               <span>Inventory note</span>
               <input type="text" name="inventoryNotes" value="" placeholder="Closeout note" />
             </label>
+          </div>
+          <input type="hidden" name="inventoryMatchIndex" value="" />
+          <div class="parts-drawer-match-shell" data-parts-drawer-match-shell hidden>
+            <div class="chart-head">
+              <span>Existing inventory matches</span>
+              <strong data-parts-drawer-match-summary>Choose an existing row to add stock there.</strong>
+            </div>
+            <div class="parts-drawer-match-list" data-parts-drawer-match-suggestions></div>
           </div>
         </div>
         ${isBulk ? `
@@ -1047,7 +1259,7 @@ function partsManageFormMarkup(data) {
           <div class="fold-summary-copy">
             <span>Manual add</span>
             <strong>Create new part order</strong>
-            <em>Fast entry for general requests, supplier orders, and maintenance-linked parts.</em>
+            <em>Fast entry for general requests and supplier orders.</em>
           </div>
           <div class="fold-summary-right">
             <span class="fold-summary-toggle">Open form</span>
@@ -1073,22 +1285,6 @@ function partsManageFormMarkup(data) {
             <label><span>Serial Number</span><input name="serialNumber" /></label>
             <label><span>Opened By</span><input name="openedBy" /></label>
             <label><span>Project</span><input name="project" list="parts-project-options" /></label>
-            <label><span>Maintenance Component</span><input name="maintenanceComponent" /></label>
-            <label><span>Maintenance Task</span><input name="maintenanceTask" /></label>
-            <div class="parts-create-autoids parts-form-span">
-              <div class="parts-create-autoid-card">
-                <span>Maintenance Task ID</span>
-                <strong data-parts-create-task-id-preview>Auto after component + task</strong>
-                <small>Generated from the maintenance link when you save.</small>
-                <input type="hidden" name="maintenanceTaskId" data-parts-create-task-id-input />
-              </div>
-              <div class="parts-create-autoid-card">
-                <span>Wait ID</span>
-                <strong data-parts-create-wait-id-preview>Auto when needed</strong>
-                <small>Filled automatically only if a maintenance wait record is created.</small>
-                <input type="hidden" name="waitId" data-parts-create-wait-id-input />
-              </div>
-            </div>
             <label class="is-hidden" data-parts-create-stage="wait"><span>Approval Requested From</span><input name="approvalRequestedFrom" /></label>
             <label class="is-hidden" data-parts-create-stage="approved"><span>Approved By</span><input name="approvedBy" /></label>
             <label class="is-hidden" data-parts-create-stage="approved"><span>Approval Date</span><input name="approvalDate" type="date" value="${todayIsoDate()}" /></label>
@@ -1345,13 +1541,13 @@ function maintenanceTimelineMarkup(events, emptyMessage) {
   `;
 }
 
-function maintenancePrepHorizonMarkup(events, emptyMessage, data = null, selectedTaskId = "", cutoffProgress = "", prepProgress = "", focusLaneKey = "", horizonProgress = "", horizonFoldOpen = false, activeStageKey = "need-prep", actionState = null) {
+function maintenancePrepHorizonMarkup(events, emptyMessage, data = null, selectedTaskId = "", cutoffProgress = "", prepProgress = "", focusLaneKey = "", horizonProgress = "", horizonFoldOpen = false, activeStageKey = "need-prep", actionState = null, selectedReadyTaskIds = []) {
   if (!events?.length) {
     return `<div class="chart-empty">${emptyMessage}</div>`;
   }
   return `
     <div class="maintenance-horizon-timeline">
-      ${data ? maintenancePrepHorizonPlotMarkup(data, selectedTaskId, parseMaintenancePrepCutoffMap(cutoffProgress), parseMaintenancePrepCutoffMap(prepProgress), focusLaneKey, parseMaintenancePrepHorizonMap(horizonProgress), horizonFoldOpen, activeStageKey, actionState) : maintenanceTimelineMarkup(events.slice(0, 6), emptyMessage)}
+      ${data ? maintenancePrepHorizonPlotMarkup(data, selectedTaskId, parseMaintenancePrepCutoffMap(cutoffProgress), parseMaintenancePrepCutoffMap(prepProgress), focusLaneKey, parseMaintenancePrepHorizonMap(horizonProgress), horizonFoldOpen, activeStageKey, actionState, selectedReadyTaskIds) : maintenanceTimelineMarkup(events.slice(0, 6), emptyMessage)}
     </div>
   `;
 }
@@ -1578,38 +1774,179 @@ function maintenanceBuilderMarkup(item) {
   }
   const builderMeta = collectMaintenanceBuilderMeta();
   const wp = item.work_package || {};
-  const selectedParts = parseBuilderPartsValue((item.required_parts || []).join("; "));
+  const selectedParts = parseBuilderPartsValue(
+    item.mandatory_parts_text || item.required_parts_text || (item.required_parts || []).join("; "),
+  );
+  const selectedTools = parseBuilderPartsValue(
+    item.required_tools_text || (item.required_tools || []).join("; "),
+  );
   const savedPhotoValue = String(wp.procedure_photos || "").trim();
   const fallRiskValue = normalizeFallRisk(wp.safety_fall_risk);
   const tnmValue = deriveMaintenanceTnmPresence(fallRiskValue, wp.safety_tnm_presence);
+  const trackingModeValue = String(item.tracking_mode || "").trim();
+  const intervalTypeValue = String(item.interval_type || "").trim();
+  const intervalUnitValue = String(item.interval_unit || "").trim();
+  const hoursSourceValue = String(item.hours_source || "").trim();
+  const triggerHoursSourceValue = String(item.trigger_hours_source || hoursSourceValue).trim();
+  const triggerCalendarUnitValue = String(item.trigger_calendar_unit || intervalUnitValue).trim();
+  const autoOrderValue = String(item.auto_order_mandatory_parts || "").trim().toLowerCase();
+  const autoOrderEnabled = ["1", "true", "yes", "y", "enabled"].includes(autoOrderValue);
+  const testPresetValue = String(item.test_preset || "").trim();
+  const optionMarkup = (options = [], selectedValue = "", blankLabel = "Select") => {
+    const values = dedupeStrings(options.filter(Boolean));
+    const rendered = values.map((option) => {
+      const value = String(option || "").trim();
+      return `<option value="${escapeHtml(value)}" ${value === String(selectedValue || "") ? "selected" : ""}>${escapeHtml(value)}</option>`;
+    });
+    return [`<option value="">${escapeHtml(blankLabel)}</option>`, ...rendered].join("");
+  };
   return `
     <form id="maintenance-builder-form" class="maintenance-builder-form">
       <input type="hidden" name="taskId" value="${item.task_id}" />
       <input type="hidden" name="component" value="${item.component}" />
-      <input type="hidden" name="task" value="${item.task}" />
+      <input type="hidden" name="originalTask" value="${escapeHtml(item.task)}" />
+      <input type="hidden" name="sourceFile" value="${escapeHtml(item.source_file || "")}" />
       <div class="maintenance-builder-canvas">
         <section class="maintenance-builder-column maintenance-builder-column-unified">
           <div class="chart-head">
             <span>Package editor</span>
-            <strong>Checklist, procedure, safety, and completion logic</strong>
+            <strong>Legacy builder data, package flow, and execution logic</strong>
           </div>
           <div class="maintenance-builder-section-grid">
             <div class="maintenance-builder-section maintenance-builder-section-primary">
               <div class="maintenance-builder-section-head">
-                <span>Package setup</span>
-                <strong>Group and required parts</strong>
+                <span>Task profile</span>
+                <strong>Task title, grouping, ownership, and trigger context</strong>
+              </div>
+              <div class="field-grid field-grid-2 maintenance-builder-row">
+                <label class="field-block">
+                  <span>Task name</span>
+                  <input type="text" name="task" value="${escapeHtml(item.task)}" placeholder="Control the task title used across the app" />
+                </label>
+                <label class="field-block maintenance-builder-field-compact">
+                  <span>Component</span>
+                  <input type="text" value="${escapeHtml(item.component)}" readonly />
+                </label>
               </div>
               <div class="field-grid field-grid-2 maintenance-builder-row">
                 <label class="field-block maintenance-builder-field-compact">
-                  <span>Task group</span>
+                  <span>Primary task group</span>
                   <select name="taskGroup">
-                    ${builderMeta.taskGroups
-                      .map((option) => `<option value="${escapeHtml(option)}" ${option === (item.task_group || "") ? "selected" : ""}>${escapeHtml(option)}</option>`)
-                      .join("")}
+                    ${optionMarkup(builderMeta.taskGroups, item.task_group || "", "Select group")}
                   </select>
                 </label>
+                <label class="field-block maintenance-builder-field-compact">
+                  <span>Linked task groups</span>
+                  <input type="text" name="taskGroups" value="${escapeHtml(item.task_groups || item.task_group || "")}" placeholder="Routine, Hours, Safety..." />
+                </label>
+              </div>
+              <div class="field-grid field-grid-2 maintenance-builder-row">
+                <label class="field-block maintenance-builder-field-compact">
+                  <span>Owner</span>
+                  <input type="text" name="owner" value="${escapeHtml(item.owner || "")}" placeholder="Maintenance / operator / vendor owner" />
+                </label>
                 <label class="field-block">
-                  <span>Required parts</span>
+                  <span>Trigger context</span>
+                  <input type="text" name="triggerContext" value="${escapeHtml(item.trigger_context || "")}" placeholder="What makes the task relevant in the real process?" />
+                </label>
+              </div>
+            </div>
+            <div class="maintenance-builder-section">
+              <div class="maintenance-builder-section-head">
+                <span>Timing + triggers</span>
+                <strong>Due logic, planning window, and reset inputs</strong>
+              </div>
+              <div class="field-grid field-grid-3 maintenance-builder-row">
+                <label class="field-block maintenance-builder-field-compact">
+                  <span>Tracking mode</span>
+                  <select name="trackingMode">
+                    ${optionMarkup(builderMeta.trackingModes, trackingModeValue, "Select mode")}
+                  </select>
+                </label>
+                <label class="field-block maintenance-builder-field-compact">
+                  <span>Hours source</span>
+                  <select name="hoursSource">
+                    ${optionMarkup(builderMeta.hoursSources, hoursSourceValue, "Select source")}
+                  </select>
+                </label>
+                <label class="field-block maintenance-builder-field-compact">
+                  <span>Interval type</span>
+                  <select name="intervalType">
+                    ${optionMarkup(builderMeta.intervalTypes, intervalTypeValue, "Select type")}
+                  </select>
+                </label>
+              </div>
+              <div class="field-grid field-grid-3 maintenance-builder-row">
+                <label class="field-block maintenance-builder-field-compact">
+                  <span>Interval value</span>
+                  <input type="number" step="any" name="intervalValue" value="${escapeHtml(item.interval_value || "")}" />
+                </label>
+                <label class="field-block maintenance-builder-field-compact">
+                  <span>Interval unit</span>
+                  <select name="intervalUnit">
+                    ${optionMarkup(builderMeta.intervalUnits, intervalUnitValue, "Select unit")}
+                  </select>
+                </label>
+                <label class="field-block maintenance-builder-field-compact">
+                  <span>Planning window (months)</span>
+                  <input type="number" step="1" min="0" name="planningWindowMonths" value="${escapeHtml(item.planning_window_months || "")}" />
+                </label>
+              </div>
+              <div class="field-grid field-grid-3 maintenance-builder-row">
+                <label class="field-block maintenance-builder-field-compact">
+                  <span>Due threshold (days)</span>
+                  <input type="number" step="1" min="0" name="dueThresholdDays" value="${escapeHtml(item.due_threshold_days || "")}" />
+                </label>
+                <label class="field-block maintenance-builder-field-compact">
+                  <span>Trigger modes</span>
+                  <input type="text" name="triggerModes" value="${escapeHtml(item.trigger_modes || "")}" placeholder="hours, draws, calendar" />
+                </label>
+                <label class="field-block maintenance-builder-field-compact">
+                  <span>Trigger hours source</span>
+                  <select name="triggerHoursSource">
+                    ${optionMarkup(builderMeta.hoursSources, triggerHoursSourceValue, "Select source")}
+                  </select>
+                </label>
+              </div>
+              <div class="field-grid field-grid-3 maintenance-builder-row">
+                <label class="field-block maintenance-builder-field-compact">
+                  <span>Trigger hours interval</span>
+                  <input type="number" step="any" min="0" name="triggerHoursInterval" value="${escapeHtml(item.trigger_hours_interval || "")}" />
+                </label>
+                <label class="field-block maintenance-builder-field-compact">
+                  <span>Trigger draws interval</span>
+                  <input type="number" step="1" min="0" name="triggerDrawsInterval" value="${escapeHtml(item.trigger_draws_interval || "")}" />
+                </label>
+                <label class="field-block maintenance-builder-field-compact">
+                  <span>Calendar rule</span>
+                  <input type="text" name="calendarRule" value="${escapeHtml(item.calendar_rule || "")}" placeholder="Weekly / first Sunday / etc." />
+                </label>
+              </div>
+              <div class="field-grid field-grid-3 maintenance-builder-row">
+                <label class="field-block maintenance-builder-field-compact">
+                  <span>Trigger calendar value</span>
+                  <input type="number" step="1" min="0" name="triggerCalendarValue" value="${escapeHtml(item.trigger_calendar_value || "")}" />
+                </label>
+                <label class="field-block maintenance-builder-field-compact">
+                  <span>Trigger calendar unit</span>
+                  <select name="triggerCalendarUnit">
+                    ${optionMarkup(builderMeta.calendarUnits, triggerCalendarUnitValue, "Select unit")}
+                  </select>
+                </label>
+                <label class="field-block maintenance-builder-field-compact">
+                  <span>Source tracker file</span>
+                  <input type="text" value="${escapeHtml(item.source_file || "")}" readonly />
+                </label>
+              </div>
+            </div>
+            <div class="maintenance-builder-section maintenance-builder-section-primary">
+              <div class="maintenance-builder-section-head">
+                <span>Automatic parts flow</span>
+                <strong>Mandatory parts, tools, conditional items, and prep timing</strong>
+              </div>
+              <div class="field-grid field-grid-2 maintenance-builder-row">
+                <label class="field-block">
+                  <span>Mandatory parts</span>
                   <input type="hidden" name="requiredParts" id="maintenance-required-parts-input" value="${escapeHtml(selectedParts.join("; "))}" />
                   <div class="maintenance-parts-picker" data-maint-parts-picker="1">
                     <div class="maintenance-parts-selected" id="maintenance-required-parts-selected">
@@ -1637,6 +1974,59 @@ function maintenanceBuilderMarkup(item) {
                     </div>
                     <div class="maintenance-parts-suggestions" id="maintenance-required-parts-suggestions"></div>
                   </div>
+                </label>
+                <label class="field-block">
+                  <span>Required tools</span>
+                  <input type="hidden" name="requiredTools" id="maintenance-required-tools-input" value="${escapeHtml(selectedTools.join("; "))}" />
+                  <div class="maintenance-parts-picker maintenance-tools-picker" data-maint-tools-picker="1">
+                    <div class="maintenance-parts-selected" id="maintenance-required-tools-selected">
+                      ${selectedTools.length
+                        ? selectedTools
+                            .map(
+                              (tool) => `
+                                <button class="maintenance-parts-chip maintenance-parts-chip-tool" type="button" data-maint-tool-chip="${escapeHtml(tool)}">
+                                  <span>${escapeHtml(tool)}</span>
+                                  <strong>×</strong>
+                                </button>
+                              `,
+                            )
+                            .join("")
+                        : `<span class="maintenance-parts-placeholder">No tools linked yet</span>`}
+                    </div>
+                    <div class="maintenance-parts-controls">
+                      <input
+                        type="text"
+                        class="maintenance-parts-search"
+                        id="maintenance-required-tools-search"
+                        placeholder="Filter relevant tools or type a new tool..."
+                        autocomplete="off"
+                      />
+                    </div>
+                    <div class="maintenance-parts-suggestions" id="maintenance-required-tools-suggestions"></div>
+                  </div>
+                </label>
+              </div>
+              <div class="field-grid maintenance-builder-row">
+                <label class="field-block">
+                  <span>Conditional parts</span>
+                  <textarea name="conditionalParts" rows="5" placeholder="Visible for inspection and execution, but not auto-ordered.">${item.conditional_parts_text || ""}</textarea>
+                </label>
+              </div>
+              <div class="field-grid field-grid-3 maintenance-builder-row">
+                <label class="field-block maintenance-builder-field-compact">
+                  <span>Preparation lead (days)</span>
+                  <input type="number" step="1" min="0" name="preparationLeadDays" value="${escapeHtml(item.preparation_lead_days || "")}" />
+                </label>
+                <label class="field-block maintenance-builder-field-compact">
+                  <span>Parts-check lead (days)</span>
+                  <input type="number" step="1" min="0" name="partsCheckLeadDays" value="${escapeHtml(item.parts_check_lead_days || "")}" />
+                </label>
+                <label class="field-block maintenance-builder-field-compact">
+                  <span>Auto-order mandatory parts</span>
+                  <select name="autoOrderMandatoryParts">
+                    <option value="yes" ${autoOrderEnabled ? "selected" : ""}>Enabled</option>
+                    <option value="no" ${!autoOrderEnabled ? "selected" : ""}>Disabled</option>
+                  </select>
                 </label>
               </div>
             </div>
@@ -1672,6 +2062,38 @@ function maintenanceBuilderMarkup(item) {
                     <button class="maintenance-checklist-add" type="button" data-maint-checklist-add>+ Procedure step</button>
                   </div>
                 </section>
+              </div>
+            </div>
+            <div class="maintenance-builder-section">
+              <div class="maintenance-builder-section-head">
+                <span>Manual context</span>
+                <strong>Legacy manual linkage, pinned page, and task notes</strong>
+              </div>
+              <div class="field-grid field-grid-3 maintenance-builder-row">
+                <label class="field-block maintenance-builder-field-compact">
+                  <span>Manual name</span>
+                  <input type="text" name="manualName" value="${escapeHtml(item.manual_name || "")}" placeholder="Manual file or display name" />
+                </label>
+                <label class="field-block maintenance-builder-field-compact">
+                  <span>Manual page</span>
+                  <input type="text" name="manualPage" value="${escapeHtml(item.manual_page || "")}" placeholder="33,34,35 or single page" />
+                </label>
+                <label class="field-block">
+                  <span>Manual link / document</span>
+                  <input type="text" name="manualLink" value="${escapeHtml(item.manual_link || "")}" placeholder="Document path or link" />
+                </label>
+              </div>
+              <div class="maintenance-safety-copy-grid maintenance-builder-row">
+                <label class="field-block maintenance-safety-field">
+                  <span>Procedure summary (source)</span>
+                  <small class="field-note">Legacy summary text saved back to the maintenance tracker source.</small>
+                  <textarea name="procedureSummary" rows="5">${item.procedure_summary_text || item.procedure_summary || ""}</textarea>
+                </label>
+                <label class="field-block">
+                  <span>Safety / notes (source)</span>
+                  <small class="field-note">Base maintenance notes from the source tracker, separate from the live package protocol.</small>
+                  <textarea name="safetyNotes" rows="5">${item.safety_notes_text || item.safety_notes || ""}</textarea>
+                </label>
               </div>
             </div>
             <div class="maintenance-builder-section">
@@ -1732,6 +2154,52 @@ function maintenanceBuilderMarkup(item) {
                   </div>
                 </div>
               </div>
+              <div class="field-grid maintenance-builder-row">
+                <label class="field-block">
+                  <span>Completion criteria</span>
+                  <small class="field-note">Describe what must be true before the operator can close the task.</small>
+                  <textarea name="completionCriteria" rows="4">${wp.completion_criteria || ""}</textarea>
+                </label>
+              </div>
+            </div>
+            <div class="maintenance-builder-section">
+              <div class="maintenance-builder-section-head">
+                <span>Test + condition capture</span>
+                <strong>Measured values, thresholds, and follow-up action</strong>
+              </div>
+              <div class="field-grid field-grid-3 maintenance-builder-row">
+                <label class="field-block maintenance-builder-field-compact">
+                  <span>Test preset</span>
+                  <select name="testPreset">
+                    ${optionMarkup(builderMeta.testPresetOptions, testPresetValue, "Custom / none")}
+                  </select>
+                </label>
+                <label class="field-block maintenance-builder-field-compact">
+                  <span>Action if condition is met</span>
+                  <input type="text" name="testAction" value="${escapeHtml(item.test_action || "")}" placeholder="Set prep needed / schedule replacement / etc." />
+                </label>
+                <label class="field-block maintenance-builder-field-compact">
+                  <span>Trigger context note</span>
+                  <input type="text" value="${escapeHtml(item.trigger_context || "")}" disabled />
+                </label>
+              </div>
+              <div class="field-grid field-grid-2 maintenance-builder-row">
+                <label class="field-block">
+                  <span>Fields to capture</span>
+                  <textarea name="testFields" rows="4" placeholder="Voltage (V); Temperature (degC); X offset (mm)">${item.test_fields || ""}</textarea>
+                </label>
+                <label class="field-block">
+                  <span>Condition text</span>
+                  <textarea name="testCondition" rows="4" placeholder="If measured values drift past expected range...">${item.test_condition || ""}</textarea>
+                </label>
+              </div>
+              <div class="field-grid maintenance-builder-row">
+                <label class="field-block">
+                  <span>Thresholds JSON</span>
+                  <small class="field-note">Keep the raw threshold rows here. The legacy builder stored this as JSON in the task source.</small>
+                  <textarea name="testThresholds" rows="4" placeholder='[{"Field":"Voltage","Rule":">","Value":"25","Trigger Label":"High voltage"}]'>${item.test_thresholds || ""}</textarea>
+                </label>
+              </div>
             </div>
             <div class="maintenance-builder-section">
               <div class="maintenance-builder-section-head">
@@ -1753,6 +2221,7 @@ function maintenanceBuilderMarkup(item) {
           <div class="maintenance-builder-meta">
             <div class="micro-row"><span>Updated</span><strong>${wp.last_updated || "Never"}</strong></div>
             <div class="micro-row"><span>Required parts</span><strong>${(item.required_parts || []).length}</strong></div>
+            <div class="micro-row"><span>Required tools</span><strong>${(item.required_tools || []).length}</strong></div>
           </div>
           <div class="order-builder-actions">
             <button class="action-btn action-primary" type="submit">Save work package</button>
@@ -1761,6 +2230,81 @@ function maintenanceBuilderMarkup(item) {
       </div>
     </form>
   `;
+}
+
+function parseMaintenanceBuilderSectionState(rawValue) {
+  try {
+    const parsed = JSON.parse(String(rawValue || "").trim() || "{}");
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (_error) {
+    return {};
+  }
+}
+
+function bindMaintenanceBuilderSections(root, state = {}, onChange = () => {}) {
+  Array.from(root.querySelectorAll(".maintenance-builder-section") || []).forEach((section, index) => {
+    const head = section.querySelector(".maintenance-builder-section-head");
+    if (!head) return;
+    let copy = head.querySelector(".maintenance-builder-section-copy");
+    if (!copy) {
+      copy = document.createElement("div");
+      copy.className = "maintenance-builder-section-copy";
+      Array.from(head.childNodes).forEach((node) => {
+        copy.appendChild(node);
+      });
+      head.appendChild(copy);
+    }
+    const label = String(copy.querySelector("span")?.textContent || copy.textContent || `section-${index + 1}`).trim();
+    const key = slugifyToken(label) || `section-${index + 1}`;
+    let body = section.querySelector(".maintenance-builder-section-body");
+    if (!body) {
+      body = document.createElement("div");
+      body.className = "maintenance-builder-section-body";
+      Array.from(section.children)
+        .filter((node) => node !== head)
+        .forEach((node) => body.appendChild(node));
+      section.appendChild(body);
+    }
+    let toggle = head.querySelector(".maintenance-builder-section-toggle");
+    if (!toggle) {
+      toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "maintenance-builder-section-toggle";
+      head.appendChild(toggle);
+    }
+    let isOpen = state[key] === true;
+    const persist = () => {
+      state[key] = isOpen;
+      onChange({ ...state });
+    };
+    const applyState = () => {
+      section.classList.toggle("is-collapsed", !isOpen);
+      head.setAttribute("role", "button");
+      head.setAttribute("tabindex", "0");
+      head.setAttribute("aria-expanded", isOpen ? "true" : "false");
+      toggle.textContent = isOpen ? "Hide" : "Open";
+    };
+    const flip = () => {
+      isOpen = !isOpen;
+      persist();
+      applyState();
+    };
+    head.addEventListener("click", (event) => {
+      if (event.target === toggle || !head.contains(event.target)) return;
+      flip();
+    });
+    head.addEventListener("keydown", (event) => {
+      if (!["Enter", " "].includes(event.key)) return;
+      event.preventDefault();
+      flip();
+    });
+    toggle.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      flip();
+    });
+    applyState();
+  });
 }
 
 function parseBuilderPartsValue(value) {
@@ -1809,9 +2353,11 @@ function buildMaintenancePhotoTargetOptions(preparationValue = "", procedureValu
 }
 
 function normalizeBuilderPhotoItem(item = {}) {
-  const path = String(item.path || "").trim();
+  const rawPath = String(item.path || "").trim();
+  const path = rawPath === "[]" ? "" : rawPath;
   const tempId = String(item.temp_id || item.tempId || "").trim();
-  const name = String(item.name || "").trim() || (path ? builderFileLabel(path) : tempId ? "Pending photo" : "");
+  const rawName = String(item.name || "").trim();
+  const name = (rawName === "[]" ? "" : rawName) || (path ? builderFileLabel(path) : tempId ? "Pending photo" : "");
   const stepKey = String(item.step_key || item.stepKey || "").trim();
   const stepLabel = String(item.step_label || item.stepLabel || "").trim();
   if (!path && !tempId && !name) return null;
@@ -1901,7 +2447,7 @@ function maintenanceBuilderPhotoItemsMarkup(items = [], stepOptions = []) {
           <div class="maintenance-photo-row-media">
             ${
               photo.path || photo.preview
-                ? `<img class="maintenance-photo-row-thumb" src="${escapeHtml(photo.path || photo.preview)}" alt="${escapeHtml(photo.name || builderFileLabel(photo.path || photo.preview))}" loading="lazy" />`
+                ? `<a class="maintenance-photo-link" href="${escapeHtml(photo.path || photo.preview)}" target="_blank" rel="noopener noreferrer"><img class="maintenance-photo-row-thumb" src="${escapeHtml(photo.path || photo.preview)}" alt="${escapeHtml(photo.name || builderFileLabel(photo.path || photo.preview))}" loading="lazy" /></a>`
                 : `<div class="maintenance-photo-row-thumb is-placeholder">Photo</div>`
             }
           </div>
@@ -2006,20 +2552,70 @@ function deriveMaintenanceTnmPresence(fallRiskValue, existingValue = "") {
   return String(fallRiskValue || "").toLowerCase() === "high" ? "Not allowed" : "Allowed";
 }
 
+function isToolLikeInventoryName(value) {
+  const lowered = String(value || "").trim().toLowerCase();
+  if (!lowered) return false;
+  return [
+    "cleaning kit",
+    "cleaning cloth",
+    "tool",
+    "wrench",
+    "screwdriver",
+    "hex key",
+    "allen key",
+    "spanner",
+  ].some((token) => lowered.includes(token));
+}
+
 function collectMaintenanceBuilderMeta(rows = []) {
   const fallbackGroups = ["Routine", "Per-Draw/Startup", "On-Condition", "Weekly", "Monthly", "3-Month", "6-Month", "Yearly"];
+  const fallbackTrackingModes = ["calendar", "hours", "draws"];
+  const fallbackIntervalTypes = ["calendar", "hours", "draws", "fixed", "repeat"];
+  const fallbackIntervalUnits = ["days", "weeks", "months", "hours", "draws"];
+  const fallbackHoursSources = ["Furnace", "UV (both)", "UV1", "UV2"];
+  const fallbackCalendarUnits = ["days", "weeks", "months"];
   const sourceRows = rows.length ? rows : ((bootstrapData?.maintenance?.tasks) || []);
+  const inventoryRows = bootstrapData?.inventory?.inventory_rows || [];
   const taskGroups = dedupeStrings([...sourceRows.map((item) => item.task_group), ...fallbackGroups]);
-  const inventory = bootstrapData?.inventory || {};
+  const inventoryPartNames = inventoryRows
+    .filter((item) => !String(item?.item_type || "").trim().toLowerCase().includes("tool") && !isToolLikeInventoryName(item?.part_name))
+    .map((item) => item.part_name);
+  const inventoryToolNames = inventoryRows
+    .filter((item) => String(item?.item_type || "").trim().toLowerCase() === "tool" || isToolLikeInventoryName(item?.part_name))
+    .map((item) => item.part_name);
   const partOptions = dedupeStrings([
     ...sourceRows.flatMap((item) => item.required_parts || []),
+    ...sourceRows.flatMap((item) => item.mandatory_parts || []),
+    ...sourceRows.flatMap((item) => item.conditional_parts || []),
+    ...inventoryPartNames,
     ...((bootstrapData?.parts?.all_orders || []).map((item) => item.part_name)),
-    ...((inventory.low_stock || []).map((item) => item.part_name)),
-    ...((inventory.mounted_rows || []).map((item) => item.part_name)),
+  ]).sort((a, b) => a.localeCompare(b));
+  const toolOptions = dedupeStrings([
+    ...sourceRows.flatMap((item) => item.required_tools || []),
+    ...((bootstrapData?.maintenance?.tool_options) || []),
+    ...inventoryToolNames,
   ]).sort((a, b) => a.localeCompare(b));
   return {
     taskGroups: taskGroups.length ? taskGroups : fallbackGroups,
     partOptions,
+    toolOptions,
+    trackingModes: dedupeStrings([...sourceRows.map((item) => item.tracking_mode), ...fallbackTrackingModes]),
+    intervalTypes: dedupeStrings([...sourceRows.map((item) => item.interval_type), ...fallbackIntervalTypes]),
+    intervalUnits: dedupeStrings([
+      ...sourceRows.map((item) => item.interval_unit),
+      ...sourceRows.map((item) => item.trigger_calendar_unit),
+      ...fallbackIntervalUnits,
+    ]),
+    hoursSources: dedupeStrings([
+      ...sourceRows.map((item) => item.hours_source),
+      ...sourceRows.map((item) => item.trigger_hours_source),
+      ...fallbackHoursSources,
+    ]),
+    calendarUnits: dedupeStrings([...sourceRows.map((item) => item.trigger_calendar_unit), ...fallbackCalendarUnits]),
+    testPresetOptions: dedupeStrings([
+      ...sourceRows.map((item) => item.test_preset),
+      ...((bootstrapData?.maintenance?.test_preset_options) || []),
+    ]),
   };
 }
 
@@ -2027,27 +2623,37 @@ function maintenanceBuilderFocusMarkup(item) {
   if (!item) {
     return `<div class="chart-empty">Select a maintenance task to open the builder lane.</div>`;
   }
+  const progress = maintenanceBuilderProgress(item);
+  const sourceLabel = builderFileLabel(item.source_file || "");
   return `
     <div class="maintenance-focus-hero">
       <div class="maintenance-focus-head">
         <div class="maintenance-focus-copy">
           <span>Selected task</span>
-          <strong>${item.component}</strong>
-          <p>${item.task}</p>
+          <strong class="maintenance-focus-title">${item.task}</strong>
+          <p class="maintenance-focus-meta-line">
+            <strong>${item.component || "General task"}</strong>
+            <span>${escapeHtml(item.task_group || "General")} · ${escapeHtml(sourceLabel || "No source file")}</span>
+          </p>
+        </div>
+        <div class="maintenance-focus-actions">
+          <button class="mini-action" type="button" data-maint-edit-task-name>Rename task</button>
+          <button class="action-btn action-secondary" type="button" data-maint-open-picker>Browse tasks</button>
+          <button class="action-btn action-primary" type="button" data-maint-create-toggle>New task</button>
         </div>
       </div>
       <div class="maintenance-focus-stats">
-        <div class="maintenance-focus-stat tone-${item.work_package?.last_updated ? "good" : "warn"}">
-          <span>Package</span>
-          <strong>${item.work_package?.last_updated ? "Saved" : "Needs work"}</strong>
+        <div class="maintenance-focus-stat tone-${progress.percent >= 75 ? "good" : progress.percent >= 35 ? "info" : "warn"}">
+          <span>Builder progress</span>
+          <strong>${progress.done} / ${progress.total}</strong>
         </div>
         <div class="maintenance-focus-stat tone-info">
           <span>Group</span>
           <strong>${item.task_group || "General"}</strong>
         </div>
         <div class="maintenance-focus-stat tone-${(item.missing_parts || []).length ? "bad" : "good"}">
-          <span>Parts</span>
-          <strong>${(item.required_parts || []).length || 0}</strong>
+          <span>Parts + tools</span>
+          <strong>${((item.required_parts || []).length || 0) + ((item.required_tools || []).length || 0)}</strong>
         </div>
         <div class="maintenance-focus-stat tone-${item.manual_link ? "info" : "warn"}">
           <span>Manual</span>
@@ -2058,9 +2664,16 @@ function maintenanceBuilderFocusMarkup(item) {
   `;
 }
 
-function maintenanceBuilderPickerMarkup(rows, selectedTaskId, filters = {}) {
+function maintenanceBuilderPickerMarkup(rows, selectedTaskId, filters = {}, allRows = rows) {
   const filteredRows = rows || [];
-  const componentOptions = Array.from(new Set(filteredRows.map((item) => item.component).filter(Boolean))).sort();
+  const sourceRows = (allRows && allRows.length ? allRows : filteredRows) || [];
+  const componentOptions = Array.from(new Set(sourceRows.map((item) => item.component).filter(Boolean))).sort();
+  const groupOptions = Array.from(new Set(sourceRows.map((item) => item.task_group).filter(Boolean))).sort();
+  const sourceOptions = Array.from(new Set(sourceRows.map((item) => item.source_file).filter(Boolean))).sort();
+  const selectedTask = sourceRows.find((item) => item.task_id === selectedTaskId) || sourceRows[0] || {};
+  const defaultSource = String(filters.newTaskSource || selectedTask.source_file || sourceOptions[0] || "").trim();
+  const defaultComponent = String(filters.newTaskComponent || selectedTask.component || "General").trim() || "General";
+  const defaultGroup = String(filters.newTaskGroup || selectedTask.task_group || groupOptions[0] || "General").trim() || "General";
   return `
     <details class="fold-section fold-tone-info maintenance-builder-picker" ${filters.open ? "open" : ""}>
       <summary class="fold-summary">
@@ -2069,11 +2682,64 @@ function maintenanceBuilderPickerMarkup(rows, selectedTaskId, filters = {}) {
           <strong>Choose maintenance task</strong>
         </div>
         <div class="fold-summary-right">
+          <button class="mini-action maintenance-builder-create-launch" type="button" data-maint-create-toggle>${filters.createOpen ? "Hide new task" : "New task"}</button>
           <span class="fold-summary-meta">${filteredRows.length} tasks</span>
           <span class="fold-summary-toggle">Open</span>
         </div>
       </summary>
       <div class="fold-body maintenance-builder-picker-body">
+        ${filters.createOpen ? `
+          <section class="maintenance-builder-create-panel">
+            <div class="chart-head compact">
+              <span>New task</span>
+              <strong>Add a component-linked or general maintenance task</strong>
+            </div>
+            <form id="maintenance-builder-create-form" class="maintenance-builder-create-form">
+              <div class="maintenance-builder-create-grid">
+                <label class="field-block">
+                  <span>Source file</span>
+                  <select name="sourceFile" ${sourceOptions.length ? "" : "disabled"}>
+                    ${sourceOptions.length
+                      ? sourceOptions
+                          .map(
+                            (option) => `<option value="${escapeHtml(option)}" ${option === defaultSource ? "selected" : ""}>${escapeHtml(option)}</option>`,
+                          )
+                          .join("")
+                      : `<option value="">No maintenance source file</option>`}
+                  </select>
+                </label>
+                <label class="field-block">
+                  <span>Task group</span>
+                  <select name="taskGroup">
+                    <option value="General" ${defaultGroup === "General" ? "selected" : ""}>General</option>
+                    ${groupOptions
+                      .filter((option) => option !== "General")
+                      .map(
+                        (option) => `<option value="${escapeHtml(option)}" ${option === defaultGroup ? "selected" : ""}>${escapeHtml(option)}</option>`,
+                      )
+                      .join("")}
+                  </select>
+                </label>
+                <label class="field-block">
+                  <span>Component</span>
+                  <input type="text" name="component" list="maintenance-builder-component-list" value="${escapeHtml(defaultComponent)}" placeholder="General or component name" />
+                  <datalist id="maintenance-builder-component-list">
+                    <option value="General"></option>
+                    ${componentOptions.map((option) => `<option value="${escapeHtml(option)}"></option>`).join("")}
+                  </datalist>
+                </label>
+                <label class="field-block">
+                  <span>Task name</span>
+                  <input type="text" name="task" placeholder="Describe the maintenance task" required />
+                </label>
+              </div>
+              <div class="micro-panel maintenance-builder-create-note">Create the task in the selected maintenance tracker source, then continue editing the full package below.</div>
+              <div class="maintenance-builder-create-actions">
+                <button class="action-btn action-primary" type="submit" ${sourceOptions.length ? "" : "disabled"}>Create new task</button>
+              </div>
+            </form>
+          </section>
+        ` : ""}
         <div class="maintenance-builder-filter-row">
           <input
             class="parts-search-input maintenance-builder-search"
@@ -2100,17 +2766,42 @@ function maintenanceBuilderPickerMarkup(rows, selectedTaskId, filters = {}) {
             filteredRows.length
               ? filteredRows
                   .map(
-                    (item) => `
-                      <button
-                        class="maintenance-builder-mini-item ${selectedTaskId === item.task_id ? "is-active" : ""}"
-                        type="button"
-                        data-maint-select="${item.task_id}"
-                      >
-                        <strong>${item.component}</strong>
-                        <span>${item.task}</span>
-                        <em>${item.task_group || item.task_id || ""}</em>
-                      </button>
-                    `,
+                    (item) => {
+                      const progress = maintenanceBuilderProgress(item);
+                      return `
+                        <article class="maintenance-builder-mini-card ${selectedTaskId === item.task_id ? "is-active" : ""}">
+                          <button
+                            class="maintenance-builder-mini-item ${selectedTaskId === item.task_id ? "is-active" : ""}"
+                            type="button"
+                            data-maint-select="${item.task_id}"
+                          >
+                            <div class="maintenance-builder-mini-top">
+                              <strong>${item.component}</strong>
+                              <span class="maintenance-builder-mini-badge tone-${progress.percent >= 75 ? "good" : progress.percent >= 35 ? "info" : "warn"}">${progress.done}/${progress.total}</span>
+                            </div>
+                            <span>${item.task}</span>
+                            <em>${item.task_group || item.task_id || ""}</em>
+                            <div class="maintenance-builder-mini-progress">
+                              <span>${progress.percent}% package ready</span>
+                              <strong>${item.work_package?.last_updated ? "Saved" : "Draft"}</strong>
+                            </div>
+                            <div class="maintenance-builder-mini-bar" aria-hidden="true">
+                              <span style="width:${progress.percent}%"></span>
+                            </div>
+                          </button>
+                          <button
+                            class="maintenance-builder-mini-delete"
+                            type="button"
+                            data-maint-delete-task="${item.task_id}"
+                            data-maint-delete-component="${escapeHtml(item.component || "")}"
+                            data-maint-delete-label="${escapeHtml(item.task || "")}"
+                            data-maint-delete-source="${escapeHtml(item.source_file || "")}"
+                          >
+                            Delete task
+                          </button>
+                        </article>
+                      `;
+                    },
                   )
                   .join("")
               : `<div class="chart-empty">No tasks match this filter.</div>`
@@ -2121,10 +2812,10 @@ function maintenanceBuilderPickerMarkup(rows, selectedTaskId, filters = {}) {
   `;
 }
 
-function maintenanceBuilderWorkspaceMarkup(item, rows, selectedTaskId, filters) {
+function maintenanceBuilderWorkspaceMarkup(item, rows, selectedTaskId, filters, allRows = rows) {
   return `
     <div class="maintenance-builder-workspace-full">
-      ${maintenanceBuilderPickerMarkup(rows, selectedTaskId, filters)}
+      ${maintenanceBuilderPickerMarkup(rows, selectedTaskId, filters, allRows)}
       ${maintenanceBuilderFocusMarkup(item)}
       ${maintenanceBuilderMarkup(item)}
     </div>
@@ -2136,6 +2827,20 @@ function inferMaintenanceTimelineMode(item, index) {
   if (mode.includes("hour")) return "hours";
   if (mode.includes("draw")) return "draws";
   if (mode.includes("date") || mode.includes("calendar")) return "calendar";
+  if (mode.includes("either")) {
+    if (maintenanceFiniteDueNumber(item?.next_due_hours) != null) return "hours";
+    if (maintenanceFiniteDueNumber(item?.next_due_draw) != null) return "draws";
+    if (maintenanceParsedDueDate(item)) return "calendar";
+  }
+  if (mode.includes("event")) {
+    if (maintenanceFiniteDueNumber(item?.next_due_draw) != null) return "draws";
+    if (maintenanceFiniteDueNumber(item?.next_due_hours) != null) return "hours";
+    if (maintenanceParsedDueDate(item)) return "calendar";
+    return "draws";
+  }
+  if (maintenanceFiniteDueNumber(item?.next_due_hours) != null) return "hours";
+  if (maintenanceFiniteDueNumber(item?.next_due_draw) != null) return "draws";
+  if (maintenanceParsedDueDate(item)) return "calendar";
   if (index % 5 === 3) return "draws";
   if (index % 5 === 4) return "calendar";
   return "hours";
@@ -2150,6 +2855,8 @@ function inferMaintenanceHoursGroup(item, index) {
 }
 
 function maintenanceTimelineLaneForTask(item, index = 0) {
+  const laneEntries = maintenanceTimelineLaneEntries(item, index);
+  if (laneEntries.length) return laneEntries[0].laneKey;
   const mode = inferMaintenanceTimelineMode(item, index);
   if (mode === "calendar") return "calendar";
   if (mode === "draws") return "draws";
@@ -2168,6 +2875,87 @@ function formatMaintenanceTimelineValue(value, kind) {
 function numericOr(value, fallback) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function maintenanceFiniteDueNumber(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function maintenanceParsedDueDate(item) {
+  const raw = String(item?.next_due_date || "").trim();
+  if (!raw) return null;
+  const parsedDate = new Date(raw);
+  return Number.isNaN(parsedDate.getTime()) ? null : parsedDate;
+}
+
+function maintenanceTimelineLaneEntries(item, index = 0) {
+  const entries = [];
+  const seenLaneKeys = new Set();
+  const pushEntry = (laneKey, dueValue) => {
+    if (!laneKey || dueValue == null || seenLaneKeys.has(laneKey)) return;
+    seenLaneKeys.add(laneKey);
+    entries.push({ laneKey, dueValue });
+  };
+  const nextDueHours = maintenanceFiniteDueNumber(item?.next_due_hours);
+  const nextDueDraw = maintenanceFiniteDueNumber(item?.next_due_draw);
+  const nextDueDate = maintenanceParsedDueDate(item);
+  if (nextDueHours != null) pushEntry(inferMaintenanceHoursGroup(item, index), nextDueHours);
+  if (nextDueDraw != null) pushEntry("draws", nextDueDraw);
+  if (nextDueDate) pushEntry("calendar", nextDueDate);
+  return entries;
+}
+
+function maintenancePrepTimelineSourceTasks(data) {
+  const prepRows = maintenanceUniqueTasks(data?.prep_queue || []);
+  if (prepRows.length) return prepRows;
+  return maintenanceUniqueTasks(
+    (data?.tasks || []).filter((task) => {
+      const status = String(task?.status || "").trim().toUpperCase();
+      return ["PREP_READY", "PREP_DONE", "WAIT FOR PART"].includes(status);
+    }),
+  );
+}
+
+function maintenanceLaneActualItems(sourceRows = [], laneKey = "") {
+  const items = [];
+  sourceRows.forEach((item, index) => {
+    maintenanceTimelineLaneEntries(item, index).forEach((entry) => {
+      if (entry.laneKey !== laneKey) return;
+      items.push({
+        taskId: item?.task_id || "",
+        component: item?.component || "",
+        task: item?.task || "",
+        title: item?.component || item?.task || "Task",
+        note: item?.task || item?.task_group || item?.timing_status || item?.status || "Maintenance task",
+        status: item?.timing_status || item?.status || "PREP_READY",
+        dueValue: entry.dueValue,
+        taskData: item,
+      });
+    });
+  });
+  return items;
+}
+
+function maintenanceLaneRangeFieldMax(lane, sourceRows = []) {
+  const current = lane.kind === "calendar" ? lane.current.getTime() : Number(lane.current);
+  const dueValues = maintenanceLaneActualItems(sourceRows, lane.key)
+    .map((item) => (lane.kind === "calendar" ? item.dueValue.getTime() : Number(item.dueValue)))
+    .filter((value) => Number.isFinite(value) && value >= current);
+  if (!dueValues.length) {
+    return lane.kind === "calendar" ? 30 : lane.kind === "draws" ? 40 : 200;
+  }
+  const furthestDue = Math.max(...dueValues);
+  if (lane.kind === "calendar") {
+    const daySpan = Math.ceil((furthestDue - current) / (24 * 60 * 60 * 1000)) + 2;
+    return Math.max(30, Math.min(3650, daySpan));
+  }
+  if (lane.kind === "draws") {
+    return Math.max(40, Math.min(5000, Math.ceil(furthestDue - current) + 2));
+  }
+  return Math.max(200, Math.min(10000, Math.ceil(furthestDue - current) + 12));
 }
 
 function maintenanceDemoItemsForLane(lane, now, sourceRows = []) {
@@ -2237,7 +3025,7 @@ function parseMaintenancePrepCutoffMap(value) {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
     return Object.fromEntries(
       Object.entries(parsed)
-        .map(([key, entryValue]) => [key, Math.max(0.04, Math.min(0.98, Number(entryValue)))])
+        .map(([key, entryValue]) => [key, Math.max(0, Math.min(0.98, Number(entryValue)))])
         .filter(([, entryValue]) => Number.isFinite(entryValue)),
     );
   } catch (_error) {
@@ -2276,36 +3064,22 @@ function buildMaintenanceTimelineLanes(data, options = {}) {
     { key: "calendar", title: "Calendar", subtitle: "Date", kind: "calendar", tone: "warn", current: now, items: [] },
   ];
   const laneMap = new Map(lanes.map((lane) => [lane.key, lane]));
-  const tasks = sourceTasks.slice(0, options.limit || 20);
+  const tasks = sourceTasks.slice();
 
   tasks.forEach((item, index) => {
-    const mode = inferMaintenanceTimelineMode(item, index);
-    const laneKey = mode === "hours" ? inferMaintenanceHoursGroup(item, index) : mode;
-    const lane = laneMap.get(laneKey) || laneMap.get("furnace");
-    if (!lane) return;
-
-    let dueValue;
-    if (lane.kind === "calendar") {
-      const parsedDate = item.next_due_date ? new Date(item.next_due_date) : null;
-      dueValue = parsedDate && !Number.isNaN(parsedDate.getTime()) ? parsedDate : null;
-    } else if (lane.kind === "draws") {
-      const parsedDraw = Number(item.next_due_draw);
-      dueValue = Number.isFinite(parsedDraw) ? parsedDraw : null;
-    } else {
-      const parsedHours = Number(item.next_due_hours);
-      dueValue = Number.isFinite(parsedHours) ? parsedHours : null;
-    }
-    if (dueValue == null) return;
-
-    lane.items.push({
-      taskId: item.task_id || "",
-      component: item.component || "",
-      task: item.task || "",
-      title: item.component || item.task || `Task ${index + 1}`,
-      note: item.task || item.task_group || item.timing_status || item.status || "Maintenance task",
-      status: item.timing_status || item.status || "PREP_READY",
-      dueValue,
-      taskData: item,
+    maintenanceTimelineLaneEntries(item, index).forEach(({ laneKey, dueValue }) => {
+      const lane = laneMap.get(laneKey) || laneMap.get("furnace");
+      if (!lane) return;
+      lane.items.push({
+        taskId: item.task_id || "",
+        component: item.component || "",
+        task: item.task || "",
+        title: item.component || item.task || `Task ${index + 1}`,
+        note: item.task || item.task_group || item.timing_status || item.status || "Maintenance task",
+        status: item.timing_status || item.status || "PREP_READY",
+        dueValue,
+        taskData: item,
+      });
     });
   });
 
@@ -2360,7 +3134,66 @@ function maintenanceTaskHasPackage(task) {
 }
 
 function maintenanceTaskNeedsPrep(task) {
-  return !maintenanceTaskHasPackage(task);
+  const status = String(task?.status || "").trim().toUpperCase();
+  if (["PREP_DONE", "SCHEDULED", "IN_PROGRESS", "DONE_NOW"].includes(status)) return false;
+  return status === "PREP_READY" || status === "";
+}
+
+function maintenanceTaskWaitsForPart(task) {
+  const status = String(task?.status || "").trim().toUpperCase();
+  if (status === "WAIT FOR PART") return true;
+  return Number(task?.linked_open_count || 0) > 0
+    || Number(task?.linked_received_waiting_sync || 0) > 0;
+}
+
+function maintenanceBuilderProgress(task) {
+  const wp = task?.work_package || {};
+  const sections = [
+    Boolean(String(task?.task_group || "").trim() || String(task?.owner || "").trim() || String(task?.trigger_context || "").trim()),
+    Boolean(
+      String(task?.tracking_mode || "").trim()
+      && (
+        String(task?.interval_value || "").trim()
+        || String(task?.trigger_hours_interval || "").trim()
+        || String(task?.trigger_draws_interval || "").trim()
+        || String(task?.trigger_calendar_value || "").trim()
+      ),
+    ),
+    Boolean(
+      (task?.required_parts || []).length
+      || (task?.required_tools || []).length
+      || (task?.conditional_parts || []).length
+      || String(task?.preparation_lead_days || "").trim()
+      || String(task?.parts_check_lead_days || "").trim()
+    ),
+    Boolean(String(wp.preparation_checklist || "").trim() || String(wp.procedure_steps || "").trim()),
+    Boolean(
+      String(task?.manual_name || "").trim()
+      || String(task?.manual_link || "").trim()
+      || String(task?.manual_page || "").trim()
+      || String(task?.procedure_summary || "").trim()
+      || String(task?.safety_notes || "").trim()
+    ),
+    Boolean(
+      String(wp.safety_protocol || "").trim()
+      || String(wp.draw_stop_plan || "").trim()
+      || String(wp.est_stop_min || "").trim()
+      || String(wp.safety_fall_risk || "").trim()
+    ),
+    Boolean(String(wp.sanity_checklist || "").trim() || String(wp.completion_criteria || "").trim()),
+    Boolean(
+      String(task?.test_preset || "").trim()
+      || String(task?.test_fields || "").trim()
+      || String(task?.test_thresholds || "").trim()
+      || String(task?.test_condition || "").trim()
+      || String(task?.test_action || "").trim()
+    ),
+    Boolean(String(wp.supplier_name || "").trim() || String(wp.supplier_details || "").trim()),
+  ];
+  const total = sections.length;
+  const done = sections.filter(Boolean).length;
+  const percent = Math.max(0, Math.min(100, Math.round((done / total) * 100)));
+  return { done, total, percent };
 }
 
 function maintenanceTaskHasPartsBlocker(task) {
@@ -2369,11 +3202,98 @@ function maintenanceTaskHasPartsBlocker(task) {
     || ((task?.missing_parts || []).length > 0);
 }
 
+function maintenanceTaskOrderableParts(task) {
+  const unorderedParts = task?.missing_parts_unordered || [];
+  if (unorderedParts.length) return unorderedParts;
+  if ((task?.missing_parts_ordered || []).length) {
+    const orderedParts = new Set((task?.missing_parts_ordered || []).map((part) => String(part || "").trim().toLowerCase()).filter(Boolean));
+    return (task?.missing_parts || []).filter((part) => !orderedParts.has(String(part || "").trim().toLowerCase()));
+  }
+  return task?.missing_parts || [];
+}
+
+function maintenanceTaskHasOrderedParts(task) {
+  return Number(task?.linked_open_count || 0) > 0
+    || Number(task?.linked_received_waiting_sync || 0) > 0
+    || Number(task?.linked_ready_count || 0) > 0;
+}
+
+function maintenanceTaskOrderStatusBadges(task) {
+  const badges = [];
+  if (Number(task?.linked_open_count || 0) > 0) {
+    badges.push(`<em class="tone-prep">${escapeHtml(Number(task.linked_open_count) > 1 ? `${Number(task.linked_open_count)} parts ordered` : "Parts ordered")}</em>`);
+  }
+  if (Number(task?.linked_received_waiting_sync || 0) > 0) {
+    badges.push(`<em class="tone-execute">${escapeHtml(Number(task.linked_received_waiting_sync) > 1 ? `${Number(task.linked_received_waiting_sync)} received · sync inventory` : "Received · sync inventory")}</em>`);
+  }
+  if (Number(task?.linked_ready_count || 0) > 0) {
+    badges.push(`<em class="tone-schedule">${escapeHtml(Number(task.linked_ready_count) > 1 ? `${Number(task.linked_ready_count)} synced in inventory` : "Inventory synced")}</em>`);
+  }
+  return badges.join("");
+}
+
+function maintenanceTaskLinkedOrders(task) {
+  if (!Array.isArray(task?.linked_orders)) return [];
+  return task.linked_orders
+    .filter((item) => item && typeof item === "object")
+    .map((item) => ({
+      partName: String(item.part_name || item.partName || "").trim(),
+      status: String(item.status || "").trim() || "Unknown",
+      details: String(item.details || "").trim(),
+    }))
+    .filter((item) => item.partName || item.status || item.details);
+}
+
+function maintenanceOrderStatusTone(status = "") {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (normalized === "opened") return "is-opened";
+  if (normalized === "wait for approval") return "is-wait";
+  if (normalized === "approved") return "is-approved";
+  if (normalized === "ordered") return "is-ordered";
+  if (normalized === "received") return "is-received";
+  if (normalized === "archived" || normalized === "closed") return "is-closed";
+  return "is-neutral";
+}
+
+function maintenanceTaskLinkedOrderStatusCounts(task) {
+  const linkedOrders = maintenanceTaskLinkedOrders(task);
+  const counts = new Map();
+  linkedOrders.forEach((item) => {
+    const key = item.status || "Unknown";
+    counts.set(key, (counts.get(key) || 0) + 1);
+  });
+  const order = ["Opened", "Wait for Approval", "Approved", "Ordered", "Received", "Archived", "Closed", "Unknown"];
+  return Array.from(counts.entries())
+    .sort((a, b) => {
+      const aIndex = order.indexOf(a[0]);
+      const bIndex = order.indexOf(b[0]);
+      return (aIndex === -1 ? order.length : aIndex) - (bIndex === -1 ? order.length : bIndex);
+    })
+    .map(([status, count]) => ({ status, count }));
+}
+
+function maintenanceTaskIsPrepDone(task) {
+  return String(task?.status || "").trim().toUpperCase() === "PREP_DONE";
+}
+
 function maintenanceTaskExecuteBlocked(task) {
+  if (maintenanceTaskIsPrepDone(task)) return false;
   const status = String(task?.status || "").trim().toUpperCase();
   return maintenanceTaskNeedsPrep(task)
-    || maintenanceTaskHasPartsBlocker(task)
-    || status === "BLOCKED_PARTS"
+    || maintenanceTaskWaitsForPart(task)
+    || status === "WAIT FOR PART";
+}
+
+function maintenanceTaskCanSchedule(task) {
+  const status = String(task?.status || "").trim().toUpperCase();
+  return status === "PREP_DONE";
+}
+
+function maintenanceTaskCanPrepDone(task) {
+  const status = String(task?.status || "").trim().toUpperCase();
+  if (["PREP_DONE", "SCHEDULED", "IN_PROGRESS", "DONE_NOW"].includes(status)) return false;
+  return maintenanceTaskNeedsPrep(task)
+    || maintenanceTaskWaitsForPart(task)
     || status === "WAIT FOR PART";
 }
 
@@ -2410,11 +3330,11 @@ function maintenanceUniqueTasks(tasks = []) {
 }
 
 function maintenancePrepActionLabel(task) {
-  if ((task?.missing_parts || []).length) return "Order parts";
-  if (Number(task?.linked_open_count || 0) > 0) return "Wait order";
   if (Number(task?.linked_received_waiting_sync || 0) > 0) return "Sync inventory";
-  if (maintenanceTaskNeedsPrep(task)) return "Build package";
-  return "Ready";
+  if (maintenanceTaskOrderableParts(task).length) return "Order parts";
+  if (Number(task?.linked_open_count || 0) > 0) return "Wait for part";
+  if (maintenanceTaskCanPrepDone(task)) return "Mark ready";
+  return "Need prep";
 }
 
 function maintenanceScheduleWindowLabels(data) {
@@ -2425,12 +3345,20 @@ function maintenanceScheduleWindowLabels(data) {
 }
 
 function maintenancePrepStageAction(stageKey, task) {
-  if (stageKey === "ready") return { key: "schedule", label: "Schedule" };
   if (stageKey === "scheduled") return { key: "open-execute", label: "Open execute" };
+  if (stageKey === "ready" && maintenanceTaskCanSchedule(task)) return { key: "schedule", label: "Schedule" };
   if (Number(task?.linked_received_waiting_sync || 0) > 0) return { key: "parts", label: "Sync inv." };
-  if (Number(task?.linked_open_count || 0) > 0 && !(task?.missing_parts || []).length) return { key: "blocked", label: "Track order" };
-  if ((task?.missing_parts || []).length) return { key: "order-parts", label: "Order parts" };
-  return { key: "build-package", label: "Build package" };
+  if (maintenanceTaskOrderableParts(task).length) return { key: "order-parts", label: "Order parts" };
+  if (Number(task?.linked_open_count || 0) > 0) return null;
+  return { key: "prep-done", label: "Mark ready" };
+}
+
+function maintenancePrepStageExtraActions(stageKey, task) {
+  if (stageKey === "scheduled" || stageKey === "wait-part") return [];
+  if (!maintenanceTaskCanPrepDone(task)) return [];
+  const stageAction = maintenancePrepStageAction(stageKey, task);
+  if (!stageAction || stageAction.key === "prep-done") return [];
+  return [{ key: "prep-done", label: "Mark ready" }];
 }
 
 function maintenancePrepStageState(data, executeTasksBefore = [], prepTasksBefore = []) {
@@ -2442,44 +3370,72 @@ function maintenancePrepStageState(data, executeTasksBefore = [], prepTasksBefor
       .map((task) => maintenanceCanonicalTaskId(task) || String(task?.task_id || "").trim())
       .filter(Boolean),
   );
-  const readyTasks = maintenanceUniqueTasks(
+  const executeWindowTasks = maintenanceUniqueTasks(
     executeTasksBefore.filter((task) => {
-      const status = String(task?.status || "").trim().toUpperCase();
       const taskKey = maintenanceCanonicalTaskId(task) || String(task?.task_id || "").trim();
-      return status === "PREP_READY"
-        && !maintenanceTaskExecuteBlocked(task)
-        && !scheduledTaskKeys.has(taskKey);
+      return !scheduledTaskKeys.has(taskKey);
     }),
+  );
+  const executeWindowTaskKeys = new Set(
+    executeWindowTasks
+      .map((task) => maintenanceCanonicalTaskId(task) || String(task?.task_id || "").trim())
+      .filter(Boolean),
+  );
+  const prepDoneTasks = maintenanceUniqueTasks(
+    prepTasksBefore.filter((task) => {
+      const taskKey = maintenanceCanonicalTaskId(task) || String(task?.task_id || "").trim();
+      return maintenanceTaskIsPrepDone(task) && !scheduledTaskKeys.has(taskKey);
+    }),
+  );
+  const readyTasks = maintenanceUniqueTasks(
+    executeWindowTasks.filter((task) => maintenanceTaskCanSchedule(task)),
   );
   const readyTaskKeys = new Set(
     readyTasks
       .map((task) => maintenanceCanonicalTaskId(task) || String(task?.task_id || "").trim())
       .filter(Boolean),
   );
+  const readyStageTasks = maintenanceUniqueTasks(readyTasks);
+  const waitForPartTasks = maintenanceUniqueTasks(
+    prepTasksBefore.filter((task) => {
+      const taskKey = maintenanceCanonicalTaskId(task) || String(task?.task_id || "").trim();
+      if (scheduledTaskKeys.has(taskKey) || readyTaskKeys.has(taskKey)) return false;
+      return maintenanceTaskWaitsForPart(task);
+    }),
+  );
   const needPrepTasks = maintenanceUniqueTasks(
     prepTasksBefore.filter((task) => {
       const status = String(task?.status || "").trim().toUpperCase();
       const taskKey = maintenanceCanonicalTaskId(task) || String(task?.task_id || "").trim();
       if (scheduledTaskKeys.has(taskKey) || readyTaskKeys.has(taskKey)) return false;
-      return maintenanceTaskNeedsPrep(task)
-        || maintenanceTaskHasPartsBlocker(task)
-        || status === "BLOCKED_PARTS"
-        || status === "WAIT FOR PART";
+      if (status === "PREP_DONE" || maintenanceTaskWaitsForPart(task)) return false;
+      return status === "PREP_READY" || status === "";
     }),
   );
-  const blockedNeedPrepCount = needPrepTasks.filter((task) => {
-    const status = String(task?.status || "").trim().toUpperCase();
-    return maintenanceTaskHasPartsBlocker(task) || status === "BLOCKED_PARTS" || status === "WAIT FOR PART";
-  }).length;
   const overdueNeedPrepCount = needPrepTasks.filter((task) => maintenanceTaskLooksOverdue(task)).length;
+  const upcomingNeedPrepCount = Math.max(0, needPrepTasks.length - overdueNeedPrepCount);
+  const waitForPartOrderedCount = waitForPartTasks.filter((task) => Number(task?.linked_open_count || 0) > 0).length;
+  const waitForPartSyncCount = waitForPartTasks.filter((task) => Number(task?.linked_received_waiting_sync || 0) > 0).length;
+  const executeBlockedTasks = maintenanceUniqueTasks(
+    executeWindowTasks.filter((task) => !readyTaskKeys.has(maintenanceCanonicalTaskId(task) || String(task?.task_id || "").trim())),
+  );
   return {
     scheduledTasks,
     scheduledTaskKeys,
+    executeWindowTasks,
+    executeWindowTaskKeys,
+    prepDoneTasks,
+    waitForPartTasks,
+    readyStageTasks,
     readyTasks,
     readyTaskKeys,
+    executeBlockedTasks,
+    executeBlockedCount: executeBlockedTasks.length,
     needPrepTasks,
-    blockedNeedPrepCount,
     overdueNeedPrepCount,
+    upcomingNeedPrepCount,
+    waitForPartOrderedCount,
+    waitForPartSyncCount,
   };
 }
 
@@ -2503,6 +3459,19 @@ function parseMaintenanceStageActionState(rawValue = "") {
   } catch (error) {
     return null;
   }
+}
+
+function parseMaintenanceTaskIdList(rawValue = "") {
+  if (!rawValue) return [];
+  try {
+    const parsed = JSON.parse(rawValue);
+    if (Array.isArray(parsed)) {
+      return dedupeStrings(parsed.map((item) => String(item || "").trim()).filter(Boolean));
+    }
+  } catch (error) {
+    // Fall back to comma-separated values for older state payloads.
+  }
+  return dedupeStrings(String(rawValue || "").split(",").map((item) => item.trim()).filter(Boolean));
 }
 
 function parsePartsStageActionState(rawValue = "") {
@@ -2579,7 +3548,7 @@ function maintenancePrepActionPanelMarkup(data, actionState, taskLookup = null) 
   const firstTask = tasks[0];
   const scheduleWindow = (data?.maintenance_events || [])[0] || null;
   const scheduleWindows = (data?.maintenance_events || []).filter((item) => item?.start && item?.end);
-  const missingParts = dedupeStrings(tasks.flatMap((task) => task.missing_parts || []));
+  const missingParts = dedupeStrings(tasks.flatMap((task) => maintenanceTaskOrderableParts(task)));
   const linkedOrders = tasks.reduce((sum, task) => sum + Number(task?.linked_open_count || 0), 0);
   const receivedWaiting = tasks.reduce((sum, task) => sum + Number(task?.linked_received_waiting_sync || 0), 0);
   const isBulk = actionState.mode === "bulk";
@@ -2604,7 +3573,7 @@ function maintenancePrepActionPanelMarkup(data, actionState, taskLookup = null) 
                 <div class="maintenance-prep-actiondrawer-taskrow">
                   <strong>${escapeHtml(task.component || task.task || "Task")}</strong>
                   <div class="token-strip">
-                    ${(task.missing_parts || []).map((part) => `<span class="token-chip">${escapeHtml(part)}</span>`).join("") || `<span class="token-chip">No missing parts</span>`}
+                    ${maintenanceTaskOrderableParts(task).map((part) => `<span class="token-chip">${escapeHtml(part)}</span>`).join("") || `<span class="token-chip">No missing parts</span>`}
                   </div>
                 </div>
               `).join("")}
@@ -2612,33 +3581,6 @@ function maintenancePrepActionPanelMarkup(data, actionState, taskLookup = null) 
           `
           : `<div class="micro-panel">No missing parts are in this selection.</div>`,
         confirmLabel: isBulk ? "Order all together" : "Create order",
-      };
-    }
-    if (actionState.action === "blocked") {
-      return {
-        tone: "blocked",
-        eyebrow: "Track order",
-        title: `Watch blockers for ${firstTask.component}`,
-        body: "Open the blocked lane with this task selected so you can track linked order status and waits.",
-        meta: [
-          `<span>Open linked</span><strong>${linkedOrders}</strong>`,
-          `<span>Waiting sync</span><strong>${receivedWaiting}</strong>`,
-        ],
-        detail: `
-          <div class="maintenance-prep-actiondrawer-tasklist">
-            ${tasks.map((task) => `
-              <div class="maintenance-prep-actiondrawer-taskrow">
-                <strong>${escapeHtml(task.component || task.task || "Task")}</strong>
-                <div class="maintenance-prep-actiondrawer-rowmeta">
-                  ${(task.missing_parts || []).length ? `<span>Missing: ${escapeHtml((task.missing_parts || []).join(", "))}</span>` : ""}
-                  ${Number(task?.linked_open_count || 0) > 0 ? `<span>${Number(task.linked_open_count)} open order</span>` : ""}
-                  ${Number(task?.linked_received_waiting_sync || 0) > 0 ? `<span>${Number(task.linked_received_waiting_sync)} waiting sync</span>` : ""}
-                </div>
-              </div>
-            `).join("")}
-          </div>
-        `,
-        confirmLabel: "Open blocked lane",
       };
     }
     if (actionState.action === "parts") {
@@ -2654,20 +3596,6 @@ function maintenancePrepActionPanelMarkup(data, actionState, taskLookup = null) 
         confirmLabel: "Open tower parts",
       };
     }
-    if (actionState.action === "build-package") {
-      return {
-        tone: "prep",
-        eyebrow: "Build package",
-        title: `Open builder for ${firstTask.component}`,
-        body: "Send this task into the builder so the prep package can be completed before the stop.",
-        meta: [
-          `<span>Task</span><strong>1</strong>`,
-          `<span>Needs prep</span><strong>${tasks.length}</strong>`,
-        ],
-        detail: `<div class="micro-panel">${escapeHtml(firstTask.task || "")}</div>`,
-        confirmLabel: "Open builder",
-      };
-    }
     if (actionState.action === "schedule" || actionState.action === "schedule-all") {
       const scheduleSeed = scheduleWindows[0] || { start: "", end: "", label: "" };
       return {
@@ -2675,16 +3603,16 @@ function maintenancePrepActionPanelMarkup(data, actionState, taskLookup = null) 
         eyebrow: isBulk ? "Schedule all" : "Schedule",
         title: isBulk ? `Schedule ${tasks.length} ready tasks` : `Schedule ${firstTask.component}`,
         body: isBulk
-          ? "Choose one shared stop window for this task set."
-          : "Choose the stop window for this task.",
+          ? "Choose the start and end of the interval. The selected tasks will be spread through it and written into the app calendar."
+          : "Choose the exact start and end time for this task in the app calendar.",
         meta: [
           `<span>Tasks</span><strong>${tasks.length}</strong>`,
-          `<span>Mode</span><strong>${isBulk ? "Shared window" : "Single window"}</strong>`,
+          `<span>Mode</span><strong>${isBulk ? "Spread interval" : "Exact window"}</strong>`,
         ],
         detail: `
           <div class="maintenance-prep-actiondrawer-slot">
             <div class="maintenance-prep-actiondrawer-slothead">
-              <strong>Schedule window</strong>
+              <strong>${isBulk ? "Schedule interval" : "Schedule window"}</strong>
               <span>${escapeHtml(scheduleSeed.label || "Custom maintenance window")}</span>
             </div>
             <div class="maintenance-prep-actiondrawer-slotfields">
@@ -2707,8 +3635,8 @@ function maintenancePrepActionPanelMarkup(data, actionState, taskLookup = null) 
             </div>
           </div>
           ${scheduleWindows.length
-            ? `<div class="micro-panel">The next maintenance window is prefilled here. You can edit the dates before confirming.</div>`
-            : `<div class="micro-panel">Set the start and end time for this maintenance window.</div>`}
+            ? `<div class="micro-panel">${isBulk ? "The next maintenance window is prefilled here. Edit it and the selected ready tasks will be spread across that interval in the real maintenance calendar." : "The next maintenance window is prefilled here. Edit it before confirming and the task will be written into the real maintenance calendar."}</div>`
+            : `<div class="micro-panel">${isBulk ? "Set the start and end time for the interval. The selected tasks will be spread across it and moved into Execute." : "Set the exact start and end time for this task. Scheduling here also writes to the app calendar."}</div>`}
         `,
         confirmLabel: isBulk ? "Schedule tasks" : "Schedule task",
       };
@@ -2725,6 +3653,8 @@ function maintenancePrepActionPanelMarkup(data, actionState, taskLookup = null) 
       confirmLabel: "Open execute",
     };
   })();
+
+  if (actionState.action === "blocked") return "";
 
   return `
     <section class="maintenance-prep-actiondrawer tone-${config.tone}">
@@ -2761,35 +3691,167 @@ function normalizeDateTimeLocalValue(rawValue = "") {
   return raw.includes("T") ? `${raw}:00` : raw;
 }
 
+function parseDateTimeLocalValue(rawValue = "") {
+  const normalized = normalizeDateTimeLocalValue(rawValue);
+  if (!normalized) return null;
+  const parsed = new Date(normalized);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function formatScheduleDateTimeValue(dateValue) {
+  if (!(dateValue instanceof Date) || Number.isNaN(dateValue.getTime())) return "";
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${dateValue.getFullYear()}-${pad(dateValue.getMonth() + 1)}-${pad(dateValue.getDate())}T${pad(dateValue.getHours())}:${pad(dateValue.getMinutes())}:${pad(dateValue.getSeconds())}`;
+}
+
+function maintenanceTaskScheduleMinutes(task) {
+  const rawValue = Number(task?.work_package?.est_stop_min || task?.est_duration_min || 0);
+  if (!Number.isFinite(rawValue) || rawValue <= 0) return 30;
+  return Math.max(1, Math.round(rawValue));
+}
+
+function buildMaintenanceScheduleWindows(tasks = [], selectedWindow = null) {
+  if (!tasks.length) return [];
+  const startDate = parseDateTimeLocalValue(selectedWindow?.start || "");
+  const endDate = parseDateTimeLocalValue(selectedWindow?.end || "");
+  if (!startDate || !endDate || endDate.getTime() <= startDate.getTime()) return [];
+  const label = String(selectedWindow?.label || "").trim();
+  if (tasks.length === 1) {
+    return [{
+      start: formatScheduleDateTimeValue(startDate),
+      end: formatScheduleDateTimeValue(endDate),
+      label,
+    }];
+  }
+  const totalMs = endDate.getTime() - startDate.getTime();
+  const slotMs = totalMs / tasks.length;
+  const minimumWindowMs = 60 * 1000;
+  return tasks.map((task, index) => {
+    const slotStart = new Date(startDate.getTime() + Math.round(slotMs * index));
+    const slotBoundary = index === tasks.length - 1
+      ? endDate
+      : new Date(startDate.getTime() + Math.round(slotMs * (index + 1)));
+    const preferredEnd = new Date(slotStart.getTime() + (maintenanceTaskScheduleMinutes(task) * 60 * 1000));
+    let finalEnd = preferredEnd.getTime() <= slotBoundary.getTime() ? preferredEnd : slotBoundary;
+    if (finalEnd.getTime() <= slotStart.getTime()) {
+      finalEnd = new Date(Math.min(endDate.getTime(), slotStart.getTime() + Math.max(minimumWindowMs, Math.floor(slotMs))));
+    }
+    if (finalEnd.getTime() <= slotStart.getTime()) {
+      finalEnd = new Date(slotStart.getTime() + minimumWindowMs);
+    }
+    return {
+      start: formatScheduleDateTimeValue(slotStart),
+      end: formatScheduleDateTimeValue(finalEnd),
+      label,
+    };
+  });
+}
+
 function maintenancePrepStageRowDetails(task, stageKey) {
   const parts = dedupeStrings(task?.missing_parts || []).slice(0, 4);
   const bits = [];
-  if (parts.length && (stageKey === "need-prep" || stageKey === "blocked")) {
+  if (parts.length && (stageKey === "need-prep" || stageKey === "wait-part" || stageKey === "blocked" || stageKey === "ready")) {
     bits.push(`<div class="maintenance-prep-stagepanel-rowparts">${parts.map((part) => `<span class="token-chip">${escapeHtml(part)}</span>`).join("")}</div>`);
   }
-  if (Number(task?.linked_open_count || 0) > 0 || Number(task?.linked_received_waiting_sync || 0) > 0) {
+  if (stageKey === "wait-part" && maintenanceTaskHasOrderedParts(task)) {
+    const orderedCount = Number(task?.linked_open_count || 0);
+    const waitingSyncCount = Number(task?.linked_received_waiting_sync || 0);
+    const syncedCount = Number(task?.linked_ready_count || 0);
+    const linkedOrders = maintenanceTaskLinkedOrders(task);
+    const statusCounts = maintenanceTaskLinkedOrderStatusCounts(task);
+    const liveStateSummary = statusCounts.map((item) => `${item.status}${item.count > 1 ? ` · ${item.count}` : ""}`).join(" · ");
+    let headline = "Linked parts order status";
+    let body = "Live states from the connected parts orders for this task.";
+    if (waitingSyncCount > 0) {
+      headline = waitingSyncCount > 1 ? `${waitingSyncCount} parts received` : "Part received";
+      body = "Parts arrived. Sync them into inventory to move this task forward.";
+    } else if (orderedCount > 0) {
+      headline = orderedCount > 1 ? `${orderedCount} linked orders active` : "Linked order active";
+      body = "These orders are still active, so the task stays in wait for part.";
+    } else if (syncedCount > 0) {
+      headline = syncedCount > 1 ? `${syncedCount} parts synced in inventory` : "Part synced in inventory";
+      body = "Inventory is updated for this task.";
+    }
+    bits.push(`
+      <div class="maintenance-prep-stagepanel-statuscopy is-order-status">
+        <div class="maintenance-prep-stagepanel-orderstatus-summary">
+          <div class="maintenance-prep-stagepanel-orderstatus-copy">
+            <strong>${escapeHtml(headline)}</strong>
+            <span>${escapeHtml(body)}</span>
+          </div>
+          ${statusCounts.length ? `
+            <div class="maintenance-prep-stagepanel-orderstatus-strip" aria-label="Linked order statuses">
+              ${statusCounts.map((item) => `
+                <span class="maintenance-prep-stagepanel-orderstatus-pill ${maintenanceOrderStatusTone(item.status)}">
+                  <b>${escapeHtml(item.status)}</b>
+                  <em>${item.count}</em>
+                </span>
+              `).join("")}
+            </div>
+          ` : ""}
+        </div>
+        ${liveStateSummary ? `<div class="maintenance-prep-stagepanel-orderstatus-line">${escapeHtml(liveStateSummary)}</div>` : ""}
+        ${linkedOrders.length ? `
+          <div class="maintenance-prep-stagepanel-orderlist">
+            ${linkedOrders.map((item) => `
+              <div class="maintenance-prep-stagepanel-orderitem">
+                <div class="maintenance-prep-stagepanel-orderitem-copy">
+                  <strong>${escapeHtml(item.partName || item.details || "Linked order")}</strong>
+                  <span>${escapeHtml(item.details || "Linked maintenance parts order")}</span>
+                </div>
+                <span class="maintenance-prep-stagepanel-orderitem-status ${maintenanceOrderStatusTone(item.status)}">${escapeHtml(item.status)}</span>
+              </div>
+            `).join("")}
+          </div>
+        ` : ""}
+      </div>
+    `);
+  }
+  if (stageKey !== "wait-part" && (Number(task?.linked_open_count || 0) > 0 || Number(task?.linked_received_waiting_sync || 0) > 0 || Number(task?.linked_ready_count || 0) > 0)) {
     bits.push(
       `<div class="maintenance-prep-stagepanel-rowmeta">` +
       `${Number(task?.linked_open_count || 0) > 0 ? `<span>${Number(task.linked_open_count)} open order</span>` : ""}` +
       `${Number(task?.linked_received_waiting_sync || 0) > 0 ? `<span>${Number(task.linked_received_waiting_sync)} waiting sync</span>` : ""}` +
+      `${Number(task?.linked_ready_count || 0) > 0 ? `<span>${Number(task.linked_ready_count)} synced in inventory</span>` : ""}` +
       `</div>`,
     );
   }
   return bits.join("");
 }
 
-function maintenancePrepStagePlotMarkup(data, executeTasksBefore = [], prepTasksBefore = [], activeStageKey = "need-prep", stageFlash = null, actionState = null) {
+function maintenanceResolvedPrepStageKey(stageDefs = [], activeStageKey = "need-prep") {
+  const activeStage = stageDefs.find((stage) => stage.key === activeStageKey) || null;
+  if (activeStage?.count) return activeStage.key;
+  return (stageDefs.find((stage) => stage.count) || activeStage || stageDefs[0] || { key: activeStageKey }).key;
+}
+
+function maintenancePrepStagePlotMarkup(data, executeTasksBefore = [], prepTasksBefore = [], activeStageKey = "need-prep", stageFlash = null, actionState = null, selectedReadyTaskIds = []) {
   const stageState = maintenancePrepStageState(data, executeTasksBefore, prepTasksBefore);
   const {
     scheduledTasks,
+    executeWindowTasks,
+    executeWindowTaskKeys,
+    prepDoneTasks,
+    waitForPartTasks,
+    readyStageTasks,
     readyTasks,
     readyTaskKeys,
+    executeBlockedTasks,
     needPrepTasks,
-    blockedNeedPrepCount,
     overdueNeedPrepCount,
+    upcomingNeedPrepCount,
+    waitForPartOrderedCount,
+    waitForPartSyncCount,
   } = stageState;
-  const readyTaskIds = new Set(readyTasks.map((task) => String(task?.task_id || "")));
+  const readyTaskIds = new Set(readyStageTasks.map((task) => String(task?.task_id || "")));
+  const executeReadyIds = new Set(readyTasks.map((task) => String(task?.task_id || "")));
   const scheduleLabels = maintenanceScheduleWindowLabels(data);
+  const selectedTaskSet = new Set(
+    dedupeStrings(selectedReadyTaskIds.map((item) => String(item || "").trim()).filter(Boolean)),
+  );
+  const prepDoneWaitingCount = prepDoneTasks.filter(
+    (task) => !executeWindowTaskKeys.has(maintenanceCanonicalTaskId(task) || String(task?.task_id || "").trim()),
+  ).length;
   const stageDefs = [
     {
       key: "need-prep",
@@ -2797,19 +3859,30 @@ function maintenancePrepStagePlotMarkup(data, executeTasksBefore = [], prepTasks
       tone: "prep",
       count: needPrepTasks.length,
       tasks: needPrepTasks,
-      detail: `${blockedNeedPrepCount} blocked${overdueNeedPrepCount ? ` · ${overdueNeedPrepCount} overdue` : ""}`,
-      empty: "No package-build tasks in the current prep window.",
-      tagForTask: (task) => `${maintenancePrepActionLabel(task)}${readyTaskIds.has(String(task?.task_id || "")) ? " · High priority" : ""}`,
+      detail: `${overdueNeedPrepCount ? `${overdueNeedPrepCount} overdue` : "No overdue prep"}${upcomingNeedPrepCount ? ` · ${upcomingNeedPrepCount} upcoming in band` : ""}`,
+      empty: "No tasks need prep in the current prep window.",
+    },
+    {
+      key: "wait-part",
+      label: "Wait for part",
+      tone: "prep",
+      count: waitForPartTasks.length,
+      tasks: waitForPartTasks,
+      detail: `${waitForPartOrderedCount ? `${waitForPartOrderedCount} ordered` : "No open orders"}${waitForPartSyncCount ? ` · ${waitForPartSyncCount} waiting sync` : ""}`,
+      empty: "No tasks are waiting for parts right now.",
     },
     {
       key: "ready",
       label: "Ready to execute",
       tone: "execute",
-      count: readyTasks.length,
-      tasks: readyTasks,
-      detail: readyTasks.length ? "Ready for stop window" : "Nothing ready yet",
-      empty: "No tasks are fully ready inside the execute window yet.",
-      tagForTask: () => "Ready",
+      count: readyStageTasks.length,
+      tasks: readyStageTasks,
+      detail: readyStageTasks.length
+        ? `${readyStageTasks.length} ready${prepDoneWaitingCount ? ` · ${prepDoneWaitingCount} waiting marker` : ""}`
+        : (prepDoneWaitingCount ? `${prepDoneWaitingCount} ready waiting for execute marker` : "Nothing inside the execute window yet"),
+      empty: prepDoneWaitingCount
+        ? `${prepDoneWaitingCount} ready tasks are waiting for the execute marker.`
+        : "No tasks are ready to execute yet.",
     },
     {
       key: "scheduled",
@@ -2819,11 +3892,16 @@ function maintenancePrepStagePlotMarkup(data, executeTasksBefore = [], prepTasks
       tasks: scheduledTasks,
       detail: `${scheduleLabels.length ? scheduleLabels.join(" · ") : "Waiting for stop window"}`,
       empty: "No ready tasks are waiting for a stop window.",
-      tagForTask: () => (scheduleLabels.length ? scheduleLabels.join(" · ") : "Next window"),
     },
   ];
-  const selectedStage = stageDefs.find((stage) => stage.key === activeStageKey) || stageDefs.find((stage) => stage.count) || stageDefs[0];
+  const selectedStageKey = maintenanceResolvedPrepStageKey(stageDefs, activeStageKey);
+  const selectedStage = stageDefs.find((stage) => stage.key === selectedStageKey) || stageDefs[0];
   const selectedStageTaskIds = selectedStage.tasks.map((task) => String(task?.task_id || "")).filter(Boolean).join(",");
+  const allReadyTaskIds = readyStageTasks.map((task) => String(task?.task_id || "").trim()).filter(Boolean);
+  const selectedReadyStageTaskIds = readyStageTasks
+    .filter((task) => selectedTaskSet.has(String(task?.task_id || "").trim()))
+    .map((task) => String(task?.task_id || "").trim())
+    .filter(Boolean);
   const stageTaskLookup = new Map(
     stageDefs
       .flatMap((stage) => stage.tasks)
@@ -2833,16 +3911,41 @@ function maintenancePrepStagePlotMarkup(data, executeTasksBefore = [], prepTasks
   const stageBulkMarkup = (() => {
     if (!selectedStage.tasks.length) return "";
     if (selectedStage.key === "need-prep" || selectedStage.key === "blocked") {
+      const orderableStageTaskIds = selectedStage.tasks
+        .filter((task) => maintenanceTaskOrderableParts(task).length)
+        .map((task) => String(task?.task_id || "").trim())
+        .filter(Boolean);
+      const selectedOrderableTaskIds = orderableStageTaskIds.filter((taskId) => selectedTaskSet.has(taskId));
+      if (!orderableStageTaskIds.length) return "";
       return `
-        <button class="maintenance-prep-stagepanel-bulk" type="button" data-maint-stage-bulk="order-all" data-maint-stage-task-ids="${escapeHtml(selectedStageTaskIds)}">
-          Order all missing
+        ${selectedOrderableTaskIds.length ? `
+          <button class="maintenance-prep-stagepanel-bulk" type="button" data-maint-stage-bulk="order-all" data-maint-stage-task-ids="${escapeHtml(selectedOrderableTaskIds.join(","))}">
+            Order selected (${selectedOrderableTaskIds.length})
+          </button>
+          <button class="maintenance-prep-stagepanel-bulk" type="button" data-maint-stage-clear-selection="1">
+            Clear
+          </button>
+        ` : ""}
+        <button class="maintenance-prep-stagepanel-bulk" type="button" data-maint-stage-bulk="order-all" data-maint-stage-task-ids="${escapeHtml(orderableStageTaskIds.join(","))}">
+          Order all missing (${orderableStageTaskIds.length})
         </button>
       `;
     }
     if (selectedStage.key === "ready") {
+      if (!allReadyTaskIds.length) return "";
+      const schedulableTaskIds = allReadyTaskIds.join(",");
+      const selectedSchedulableTaskIds = selectedReadyStageTaskIds.join(",");
       return `
-        <button class="maintenance-prep-stagepanel-bulk" type="button" data-maint-stage-bulk="schedule-all" data-maint-stage-task-ids="${escapeHtml(selectedStageTaskIds)}">
-          Schedule all
+        ${selectedReadyStageTaskIds.length ? `
+          <button class="maintenance-prep-stagepanel-bulk" type="button" data-maint-stage-bulk="schedule-all" data-maint-stage-task-ids="${escapeHtml(selectedSchedulableTaskIds)}">
+            Schedule selected (${selectedReadyStageTaskIds.length})
+          </button>
+          <button class="maintenance-prep-stagepanel-bulk" type="button" data-maint-stage-clear-selection="1">
+            Clear
+          </button>
+        ` : ""}
+        <button class="maintenance-prep-stagepanel-bulk" type="button" data-maint-stage-bulk="schedule-all" data-maint-stage-task-ids="${escapeHtml(schedulableTaskIds)}">
+          Schedule all (${allReadyTaskIds.length})
         </button>
       `;
     }
@@ -2887,20 +3990,50 @@ function maintenancePrepStagePlotMarkup(data, executeTasksBefore = [], prepTasks
             ? selectedStage.tasks.map((task) => `
                 ${(() => {
                   const stageAction = maintenancePrepStageAction(selectedStage.key, task);
+                  const extraStageActions = maintenancePrepStageExtraActions(selectedStage.key, task);
+                  const rawTaskId = String(task?.task_id || "").trim();
+                  const isScheduleReady = selectedStage.key === "ready" && maintenanceTaskCanSchedule(task);
+                  const isOrderPick = selectedStage.key === "need-prep" && maintenanceTaskOrderableParts(task).length > 0;
+                  const showsPicker = Boolean(isScheduleReady || isOrderPick);
+                  const actionTagsMarkup = `
+                    ${maintenanceTaskHasOrderedParts(task) && selectedStage.key !== "wait-part" ? `<div class="maintenance-prep-stagepanel-tags">${maintenanceTaskOrderStatusBadges(task)}</div>` : ""}
+                    ${maintenanceTaskIsPrepDone(task) && selectedStage.key === "ready"
+                      ? `<div class="maintenance-prep-stagepanel-tags"><em class="tone-schedule">Ready</em></div>`
+                      : ""}
+                    ${!maintenanceTaskIsPrepDone(task) && executeReadyIds.has(String(task?.task_id || "")) && selectedStage.key === "ready"
+                      ? `<div class="maintenance-prep-stagepanel-tags"><em class="tone-schedule">Ready</em></div>`
+                      : ""}
+                    ${!executeReadyIds.has(String(task?.task_id || "")) && executeWindowTaskKeys.has(maintenanceCanonicalTaskId(task) || String(task?.task_id || "").trim()) && selectedStage.key === "ready"
+                      ? `<div class="maintenance-prep-stagepanel-tags"><em class="tone-prep">${escapeHtml(maintenancePrepActionLabel(task))}</em></div>`
+                      : ""}
+                    ${selectedStage.key === "need-prep" && executeWindowTaskKeys.has(maintenanceCanonicalTaskId(task) || String(task?.task_id || "").trim())
+                      ? `<div class="maintenance-prep-stagepanel-tags"><em class="tone-execute">In execute window</em></div>`
+                      : ""}
+                    ${readyTaskIds.has(String(task?.task_id || "")) && selectedStage.key === "need-prep"
+                      ? `<div class="maintenance-prep-stagepanel-tags"><em class="is-priority">High priority</em></div>`
+                      : ""}
+                  `.trim();
+                  const buttonMarkup = `
+                    ${extraStageActions.map((action) => `
+                      <button class="maintenance-prep-stagepanel-action" type="button" data-maint-stage-action="${escapeHtml(action.key)}" data-maint-stage-task="${escapeHtml(task.task_id || "")}">${escapeHtml(action.label)}</button>
+                    `).join("")}
+                    ${stageAction ? `<button class="maintenance-prep-stagepanel-action" type="button" data-maint-stage-action="${escapeHtml(stageAction.key)}" data-maint-stage-task="${escapeHtml(task.task_id || "")}">${escapeHtml(stageAction.label)}</button>` : ""}
+                  `.trim();
+                  const hasActions = Boolean(actionTagsMarkup || buttonMarkup);
                   return `
-                <div class="maintenance-prep-stagepanel-row">
+                <div class="maintenance-prep-stagepanel-row${showsPicker && selectedTaskSet.has(rawTaskId) ? " is-selected" : ""}${!showsPicker ? " is-wide-copy" : ""}${!hasActions ? " is-copy-only" : ""}">
+                  ${showsPicker ? `
+                    <label class="maintenance-prep-stagepanel-pick">
+                      <input type="checkbox" data-maint-stage-select="${escapeHtml(rawTaskId)}" ${selectedTaskSet.has(rawTaskId) ? "checked" : ""} />
+                      <span>Mark</span>
+                    </label>
+                  ` : ""}
                   <div class="maintenance-prep-stagepanel-copy">
                     <strong>${escapeHtml(task.component || task.task || "Task")}</strong>
                     <span>${escapeHtml(task.task || task.task_id || "")}</span>
                     ${maintenancePrepStageRowDetails(task, selectedStage.key)}
                   </div>
-                  <div class="maintenance-prep-stagepanel-actions">
-                    <div class="maintenance-prep-stagepanel-tags">
-                      ${readyTaskIds.has(String(task?.task_id || "")) && selectedStage.key === "need-prep" ? `<em class="is-priority">High priority</em>` : ""}
-                      <em class="tone-${selectedStage.tone}">${escapeHtml(selectedStage.tagForTask(task))}</em>
-                    </div>
-                    <button class="maintenance-prep-stagepanel-action" type="button" data-maint-stage-action="${escapeHtml(stageAction.key)}" data-maint-stage-task="${escapeHtml(task.task_id || "")}">${escapeHtml(stageAction.label)}</button>
-                  </div>
+                  ${hasActions ? `<div class="maintenance-prep-stagepanel-actions">${actionTagsMarkup}${buttonMarkup}</div>` : ""}
                 </div>
               `; })()}
               `).join("")
@@ -2912,20 +4045,63 @@ function maintenancePrepStagePlotMarkup(data, executeTasksBefore = [], prepTasks
   `;
 }
 
+function maintenancePrepLiveShellMarkup(data, executeTasksBefore = [], prepTasksBefore = [], activeStageKey = "need-prep", stageFlash = null, actionState = null, selectedReadyTaskIds = []) {
+  const stageState = maintenancePrepStageState(data, executeTasksBefore, prepTasksBefore);
+  const prepPoolTotal = maintenanceUniqueTasks(
+    (data?.prep_queue || []).filter((task) => !maintenanceTaskIsPrepDone(task)),
+  ).length;
+  const executeBlockedCount = stageState.executeBlockedCount;
+  const prepDoneOutsideExecuteCount = stageState.prepDoneTasks.filter(
+    (task) => !stageState.executeWindowTaskKeys.has(maintenanceCanonicalTaskId(task) || String(task?.task_id || "").trim()),
+  ).length;
+  const executeWindowCount = stageState.executeWindowTasks.length;
+  const executeReadyCount = stageState.readyTasks.length;
+  const prepNeedCount = stageState.needPrepTasks.length;
+  const waitForPartCount = stageState.waitForPartTasks.length;
+  const prepOverdueCount = stageState.overdueNeedPrepCount;
+  const prepUpcomingCount = stageState.upcomingNeedPrepCount;
+  const readyLeadLabels = stageState.readyStageTasks
+    .slice(0, 2)
+    .map((task) => task.component || task.task || "Task")
+    .filter(Boolean)
+    .join(" · ");
+  return `
+    <div class="maintenance-prep-live-shell" data-maint-prep-live-shell="1">
+      <div class="maintenance-horizon-actionbar">
+        <div class="maintenance-horizon-stepcards">
+          <div class="maintenance-horizon-stepcard is-execute">
+            <span>Execute step</span>
+            <strong><span class="is-good">${executeWindowCount} in execute window</span></strong>
+            <em>${executeWindowCount ? `${executeReadyCount} ready${executeBlockedCount ? ` · ${executeBlockedCount} blocked` : ""}${readyLeadLabels ? ` · ${escapeHtml(readyLeadLabels)}` : ""}${prepDoneOutsideExecuteCount ? ` · ${prepDoneOutsideExecuteCount} ready waiting` : ""}` : (prepDoneOutsideExecuteCount ? `${prepDoneOutsideExecuteCount} ready waiting for execute band` : "No actual tasks inside the execute band")}</em>
+          </div>
+          <div class="maintenance-horizon-stepcard is-prep">
+            <span>Preparation step</span>
+            <strong><span class="is-prep">${prepNeedCount} need prep${waitForPartCount ? ` · ${waitForPartCount} wait for part` : ""}</span></strong>
+            <em>${prepTasksBefore.length ? `${prepOverdueCount ? `${prepOverdueCount} overdue` : "No overdue prep"}${prepUpcomingCount ? ` · ${prepUpcomingCount} upcoming in band` : ""}${waitForPartCount ? ` · ${waitForPartCount} waiting on parts` : ""} · ${prepNeedCount + waitForPartCount} of ${prepPoolTotal} prep-pool tasks in band` : "No actual tasks inside the preparation band"}</em>
+          </div>
+        </div>
+      <div class="maintenance-horizon-legend">
+        <span class="maintenance-horizon-legend-line"></span>
+        <span>Execute band</span>
+        <span class="maintenance-horizon-legend-line is-prep"></span>
+        <span class="is-prep">Preparation band</span>
+      </div>
+    </div>
+      ${maintenancePrepStagePlotMarkup(data, executeTasksBefore, prepTasksBefore, activeStageKey, stageFlash, actionState, selectedReadyTaskIds)}
+    </div>
+  `;
+}
+
 function maintenancePlottedTasksBeforeMarker(lanes, progressMap = {}, options = {}) {
-  const demoNow = options.demoNow || new Date();
-  const demoSourceRows = options.demoSourceRows || [];
   const plottedTasks = [];
   lanes.forEach((lane) => {
     const progressLimit = progressMap?.[lane.key];
     if (!Number.isFinite(progressLimit)) return;
+    if (progressLimit <= 0.0001) return;
     const min = lane.kind === "calendar" ? lane.min.getTime() : Number(lane.min);
     const max = lane.kind === "calendar" ? lane.max.getTime() : Number(lane.max);
     const range = Math.max(1, max - min);
-    const visibleItems = lane.items.length
-      ? lane.items
-      : maintenanceDemoItemsForLane(lane, demoNow, demoSourceRows).slice(0, 3);
-    visibleItems
+    lane.items
       .filter((item) => item.taskData)
       .forEach((item) => {
         const due = lane.kind === "calendar" ? item.dueValue.getTime() : Number(item.dueValue);
@@ -2935,6 +4111,34 @@ function maintenancePlottedTasksBeforeMarker(lanes, progressMap = {}, options = 
       });
   });
   return plottedTasks;
+}
+
+function maintenanceSelectedTimelineLaneItem(lanes = [], selectedTaskId = "") {
+  return lanes
+    .flatMap((lane) => lane.items)
+    .find((item) => item.taskId && item.taskId === selectedTaskId)
+    || lanes.flatMap((lane) => lane.items).find((item) => item.taskId)
+    || null;
+}
+
+function maintenanceExecuteProgressMapForLanes(lanes = [], selectedTaskId = "", cutoffMap = {}) {
+  return Object.fromEntries(
+    lanes.map((lane) => {
+      const explicitValue = cutoffMap?.[lane.key];
+      if (Number.isFinite(explicitValue)) return [lane.key, explicitValue];
+      return [lane.key, 0];
+    }),
+  );
+}
+
+function maintenancePrepProgressMapForLanes(lanes = [], prepMap = {}) {
+  return Object.fromEntries(
+    lanes.map((lane) => {
+      const explicitValue = prepMap?.[lane.key];
+      if (Number.isFinite(explicitValue)) return [lane.key, explicitValue];
+      return [lane.key, 0.98];
+    }),
+  );
 }
 
 function maintenanceLaneTicksMarkup(lane) {
@@ -2951,6 +4155,7 @@ function maintenanceLaneTicksMarkup(lane) {
 function maintenanceLaneItemsMarkup(lane, options = {}) {
   const demoNow = options.demoNow || new Date();
   const demoSourceRows = options.demoSourceRows || [];
+  const showPreviewItems = options.showPreviewItems !== false;
   const min = lane.kind === "calendar" ? lane.min.getTime() : Number(lane.min);
   const max = lane.kind === "calendar" ? lane.max.getTime() : Number(lane.max);
   const range = Math.max(1, max - min);
@@ -2959,7 +4164,7 @@ function maintenanceLaneItemsMarkup(lane, options = {}) {
   const selectedTaskId = options.selectedTaskId || "";
   const selectedProgress = options.selectedProgress ?? null;
   const realItems = lane.items.filter((item) => item.taskId);
-  const previewItems = maintenanceDemoItemsForLane(lane, demoNow, demoSourceRows).slice(0, 3);
+  const previewItems = showPreviewItems ? maintenanceDemoItemsForLane(lane, demoNow, demoSourceRows).slice(0, 3) : [];
   const previewClusters = [];
   previewItems.forEach((item) => {
     const due = lane.kind === "calendar" ? item.dueValue.getTime() : Number(item.dueValue);
@@ -3063,8 +4268,8 @@ function maintenanceLaneItemsMarkup(lane, options = {}) {
   `;
 }
 
-function maintenancePrepHorizonPlotMarkup(data, selectedTaskId, cutoffMap = {}, prepMap = {}, focusLaneKey = "", horizonMap = {}, horizonFoldOpen = false, activeStageKey = "need-prep", actionState = null) {
-  const sourceRows = maintenanceUniqueTasks([...(data?.tasks || []), ...(data?.prep_queue || [])]);
+function maintenancePrepHorizonPlotMarkup(data, selectedTaskId, cutoffMap = {}, prepMap = {}, focusLaneKey = "", horizonMap = {}, horizonFoldOpen = false, activeStageKey = "need-prep", actionState = null, selectedReadyTaskIds = []) {
+  const sourceRows = maintenancePrepTimelineSourceTasks(data);
   const lanes = buildMaintenanceTimelineLanes(data, {
     sourceTasks: sourceRows,
     limit: 24,
@@ -3072,33 +4277,8 @@ function maintenancePrepHorizonPlotMarkup(data, selectedTaskId, cutoffMap = {}, 
   });
   const demoNow = new Date();
   const demoSourceRows = sourceRows;
-  const selectedItem = lanes
-    .flatMap((lane) => lane.items)
-    .find((item) => item.taskId && item.taskId === selectedTaskId)
-    || lanes.flatMap((lane) => lane.items).find((item) => item.taskId)
-    || null;
-  const laneProgressMap = Object.fromEntries(
-    lanes.map((lane) => {
-      const explicitValue = cutoffMap?.[lane.key];
-      if (Number.isFinite(explicitValue)) return [lane.key, explicitValue];
-      const laneSelectedItem = selectedItem && lane.items.some((item) => item.taskId && item.taskId === selectedItem.taskId)
-        ? lane.items.find((item) => item.taskId && item.taskId === selectedItem.taskId)
-        : null;
-      if (!laneSelectedItem) return [lane.key, 0.04];
-      const min = lane.kind === "calendar" ? lane.min.getTime() : Number(lane.min);
-      const max = lane.kind === "calendar" ? lane.max.getTime() : Number(lane.max);
-      const due = lane.kind === "calendar" ? laneSelectedItem.dueValue.getTime() : Number(laneSelectedItem.dueValue);
-      const range = Math.max(1, max - min);
-      return [lane.key, Math.max(0.04, Math.min(0.98, (due - min) / range))];
-    }),
-  );
-  const lanePrepMap = Object.fromEntries(
-    lanes.map((lane) => {
-      const explicitValue = prepMap?.[lane.key];
-      if (Number.isFinite(explicitValue)) return [lane.key, explicitValue];
-      return [lane.key, 0.98];
-    }),
-  );
+  const laneProgressMap = maintenanceExecuteProgressMapForLanes(lanes, selectedTaskId, cutoffMap);
+  const lanePrepMap = maintenancePrepProgressMapForLanes(lanes, prepMap);
   const focusLane = lanes.find((lane) => lane.key === focusLaneKey)
     || lanes.find((lane) => lane.items.some((item) => item.taskId && item.taskId === selectedTaskId))
     || lanes.find((lane) => lane.items.some((item) => item.taskId))
@@ -3109,15 +4289,6 @@ function maintenancePrepHorizonPlotMarkup(data, selectedTaskId, cutoffMap = {}, 
   const prepTasksBefore = maintenanceUniqueTasks(
     maintenancePlottedTasksBeforeMarker(lanes, lanePrepMap, { demoNow, demoSourceRows }),
   );
-  const stageState = maintenancePrepStageState(data, executeTasksBefore, prepTasksBefore);
-  const executeBlockedCount = executeTasksBefore.filter((task) => {
-    const taskKey = maintenanceCanonicalTaskId(task) || String(task?.task_id || "").trim();
-    return maintenanceTaskExecuteBlocked(task) && !stageState.scheduledTaskKeys.has(taskKey);
-  }).length;
-  const executeReadyCount = stageState.readyTasks.length;
-  const prepNeedCount = stageState.needPrepTasks.length;
-  const prepBlockedCount = stageState.blockedNeedPrepCount;
-  const prepOverdueCount = stageState.overdueNeedPrepCount;
   return `
     <details class="maintenance-horizon-rangefold" ${horizonFoldOpen ? "open" : ""}>
       <summary class="maintenance-horizon-rangefold-summary">
@@ -3130,7 +4301,7 @@ function maintenancePrepHorizonPlotMarkup(data, selectedTaskId, cutoffMap = {}, 
             ? Math.max(1, Math.round((lane.max.getTime() - lane.min.getTime()) / (24 * 60 * 60 * 1000)))
             : Math.max(1, Math.round(Number(lane.max) - Number(lane.min)));
           const unit = lane.kind === "calendar" ? "d" : lane.kind === "draws" ? "draws" : "h";
-          const sliderMax = lane.kind === "calendar" ? 30 : lane.kind === "draws" ? 40 : 200;
+          const sliderMax = Math.max(currentRange, maintenanceLaneRangeFieldMax(lane, sourceRows));
           return `
             <label class="maintenance-horizon-rangefield">
               <span>${escapeHtml(lane.title)}</span>
@@ -3152,23 +4323,9 @@ function maintenancePrepHorizonPlotMarkup(data, selectedTaskId, cutoffMap = {}, 
           const range = Math.max(1, max - min);
           const current = lane.kind === "calendar" ? lane.current.getTime() : Number(lane.current);
           const currentLeft = ((current - min) / range) * 100;
+          const allActualItems = maintenanceLaneActualItems(sourceRows, lane.key);
           const realItems = lane.items.filter((item) => item.status !== "PREVIEW");
-          const previewItems = realItems.length ? [] : maintenanceDemoItemsForLane(lane, demoNow, demoSourceRows).slice(0, 3);
-          const previewClusters = [];
           const clusters = [];
-          previewItems.forEach((item) => {
-            const due = lane.kind === "calendar" ? item.dueValue.getTime() : Number(item.dueValue);
-            const left = ((due - min) / range) * 100;
-            const normalizedLeft = Math.max(1, Math.min(99, left));
-            const bucket = Math.round(normalizedLeft / 4);
-            const existing = previewClusters.find((cluster) => cluster.bucket === bucket);
-            if (existing) {
-              existing.items.push(item);
-              existing.left = (existing.left * (existing.items.length - 1) + normalizedLeft) / existing.items.length;
-            } else {
-              previewClusters.push({ bucket, left: normalizedLeft, items: [item] });
-            }
-          });
           realItems.forEach((item) => {
             const due = lane.kind === "calendar" ? item.dueValue.getTime() : Number(item.dueValue);
             const left = ((due - min) / range) * 100;
@@ -3182,6 +4339,16 @@ function maintenancePrepHorizonPlotMarkup(data, selectedTaskId, cutoffMap = {}, 
               clusters.push({ bucket, left: normalizedLeft, items: [item] });
             }
           });
+          const nextActualItem = allActualItems
+            .filter((item) => {
+              const due = lane.kind === "calendar" ? item.dueValue.getTime() : Number(item.dueValue);
+              return Number.isFinite(due) && due > max;
+            })
+            .sort((a, b) => {
+              const left = lane.kind === "calendar" ? a.dueValue.getTime() : Number(a.dueValue);
+              const right = lane.kind === "calendar" ? b.dueValue.getTime() : Number(b.dueValue);
+              return left - right;
+            })[0] || null;
           return `
             <div class="maintenance-horizon-plot-lane">
               <div class="maintenance-horizon-plot-label">
@@ -3195,31 +4362,13 @@ function maintenancePrepHorizonPlotMarkup(data, selectedTaskId, cutoffMap = {}, 
                   <div class="maintenance-header-grid">
                     ${Array.from({ length: 6 }, () => `<span class="maintenance-header-grid-line"></span>`).join("")}
                   </div>
+                  ${prepProgress != null ? `<div class="maintenance-horizon-prep-band" style="width:${prepProgress * 100}%;" data-maint-horizon-prep-band="${escapeHtml(lane.key)}" aria-hidden="true"></div>` : ""}
+                  ${effectiveProgress != null ? `<div class="maintenance-horizon-cutoff-band" style="width:${effectiveProgress * 100}%;" data-maint-horizon-cutoff-band="${escapeHtml(lane.key)}" aria-hidden="true"></div>` : ""}
                   ${prepProgress != null ? `<button class="maintenance-horizon-prep-line" type="button" style="left:${prepProgress * 100}%;" data-maint-horizon-prep="${escapeHtml(lane.key)}" aria-label="Adjust preparation marker for ${escapeHtml(lane.title)}"></button>` : ""}
                   ${effectiveProgress != null ? `<button class="maintenance-horizon-cutoff-line" type="button" style="left:${effectiveProgress * 100}%;" data-maint-horizon-cutoff="${escapeHtml(lane.key)}" aria-label="Adjust execute line for ${escapeHtml(lane.title)}"></button>` : ""}
                   <div class="maintenance-header-now-line" style="left:${Math.max(0, Math.min(100, currentLeft))}%;">
                     <span>Now</span>
                   </div>
-                  ${previewClusters.map((cluster, index) => {
-                    const item = cluster.items[0];
-                    const beforeCutoff = effectiveProgress != null && (cluster.left / 100) <= effectiveProgress + 0.0001;
-                    return `
-                      <button
-                        class="maintenance-header-pin maintenance-horizon-demo-task tone-${lane.tone} level-${index % 2} ${beforeCutoff ? "is-before-cutoff" : ""}"
-                        type="button"
-                        style="left:${Math.max(2, Math.min(98, cluster.left))}%"
-                        aria-label="${escapeHtml(cluster.items.map((previewItem) => `${previewItem.title} | ${previewItem.note}`).join("\n"))}"
-                        title="${escapeHtml(cluster.items.map((previewItem) => `${previewItem.title} | ${previewItem.note}`).join("\n"))}"
-                      >
-                        <span class="maintenance-header-pin-dot"></span>
-                        ${cluster.items.length > 1 ? `<span class="maintenance-header-pin-count">${cluster.items.length}</span>` : ""}
-                        <span class="maintenance-header-tooltip">
-                          <strong>${escapeHtml(`${formatMaintenanceTimelineValue(item.dueValue, lane.kind)} · ${cluster.items.length > 1 ? `${cluster.items.length} demo tasks` : "Demo task"}`)}</strong>
-                          ${cluster.items.map((previewItem) => `<span>${escapeHtml(previewItem.title)} · ${escapeHtml(previewItem.note)}</span>`).join("")}
-                        </span>
-                      </button>
-                    `;
-                  }).join("")}
                   ${clusters
                     .map((cluster, index) => {
                       const level = index % 2;
@@ -3234,6 +4383,7 @@ function maintenancePrepHorizonPlotMarkup(data, selectedTaskId, cutoffMap = {}, 
                           class="maintenance-header-pin maintenance-horizon-plot-pin tone-${lane.tone} level-${level} ${(realTask.taskId && realTask.taskId === selectedTaskId) ? "is-active" : ""} ${beforeCutoff ? "is-before-cutoff" : ""}"
                           type="button"
                           style="left:${cluster.left}%;"
+                          data-maint-horizon-progress="${clusterProgress}"
                           data-maint-horizon-task="${escapeHtml(realTask.taskId || "")}"
                           aria-disabled="${realTask.taskId ? "false" : "true"}"
                           title="${escapeHtml(cluster.items.map((item) => `${item.title} | ${item.note}`).join("\n"))}"
@@ -3246,9 +4396,15 @@ function maintenancePrepHorizonPlotMarkup(data, selectedTaskId, cutoffMap = {}, 
                             ${cluster.items.length > 6 ? `<em>+${cluster.items.length - 6} more</em>` : ""}
                           </span>
                         </button>
-                      `;
+                        `;
                     })
                     .join("")}
+                  ${!realItems.length ? `
+                    <div class="maintenance-header-lane-empty maintenance-horizon-lane-empty">
+                      <strong>No actual tasks in this horizon</strong>
+                      <span>${nextActualItem ? `Next due at ${escapeHtml(formatMaintenanceTimelineValue(nextActualItem.dueValue, lane.kind))}` : "No due task on this lane yet"}</span>
+                    </div>
+                  ` : ""}
                 </div>
               </div>
             </div>
@@ -3256,33 +4412,22 @@ function maintenancePrepHorizonPlotMarkup(data, selectedTaskId, cutoffMap = {}, 
         })
         .join("")}
     </div>
-    <div class="maintenance-horizon-actionbar">
-      <div class="maintenance-horizon-stepcards">
-        <div class="maintenance-horizon-stepcard is-execute">
-          <span>Execute step</span>
-          <strong><span class="is-good">${executeReadyCount} ready</span></strong>
-          <em>${executeTasksBefore.length ? `${executeBlockedCount} blocked stay inside Need prep before this marker` : "No actual tasks before execute marker"}</em>
-        </div>
-        <div class="maintenance-horizon-stepcard is-prep">
-          <span>Preparation step</span>
-          <strong><span class="is-prep">${prepNeedCount} need prep</span></strong>
-          <em>${prepTasksBefore.length ? `${prepBlockedCount} blocked${prepOverdueCount ? ` · ${prepOverdueCount} overdue` : ""} · ${prepTasksBefore.length} actual tasks in prep window` : "No actual tasks before preparation marker"}</em>
-        </div>
-      </div>
-      <div class="maintenance-horizon-legend">
-        <span class="maintenance-horizon-legend-line"></span>
-        <span>Execute marker</span>
-        <span class="maintenance-horizon-legend-line is-prep"></span>
-        <span class="is-prep">Preparation marker</span>
-      </div>
-    </div>
-    ${maintenancePrepStagePlotMarkup(data, executeTasksBefore, prepTasksBefore, activeStageKey, maintenanceStageFlash, actionState)}
+    ${maintenancePrepLiveShellMarkup(data, executeTasksBefore, prepTasksBefore, activeStageKey, maintenanceStageFlash, actionState, selectedReadyTaskIds)}
   `;
 }
 
-function maintenanceHeaderTimelineMarkup(data) {
-  const lanes = buildMaintenanceTimelineLanes(data);
-  const demoSourceRows = (data.prep_queue || []).length ? data.prep_queue : (data.tasks || []);
+function maintenanceHeaderTimelineMarkup(data, horizonMap = {}, options = {}) {
+  const sourceRows = options.sourceTasks || maintenanceUniqueTasks([...(data?.tasks || []), ...(data?.prep_queue || [])]);
+  const showPreviewItems = options.showPreviewItems !== false;
+  const lanes = buildMaintenanceTimelineLanes(data, {
+    sourceTasks: sourceRows,
+    limit: 24,
+    horizonMap,
+  });
+  const dueTaskCount = maintenanceUniqueTasks(
+    lanes.flatMap((lane) => lane.items.map((item) => item.taskData).filter(Boolean)),
+  ).length;
+  const demoSourceRows = sourceRows;
   const demoNow = new Date();
   const runtime = data.timeline_runtime || {};
   const runtimeSummary = `Furnace ${Math.round(numericOr(runtime.furnace_hours, 0))}h · UV1 ${Math.round(numericOr(runtime.uv1_hours, 0))}h · UV2 ${Math.round(numericOr(runtime.uv2_hours, 0))}h · Draw ${Math.round(numericOr(runtime.draw_count, 0))}`;
@@ -3293,10 +4438,10 @@ function maintenanceHeaderTimelineMarkup(data) {
         <div class="maintenance-header-timeline-copy">
           <span>Maintenance timeline</span>
           <strong>Original Tower logic lanes</strong>
-          <p>Due positions are read from the same saved maintenance runtime used by the original app. ${escapeHtml(runtimeSummary)}${previewCount ? ` · ${previewCount} preview markers fill empty lanes.` : ""}</p>
+          <p>Due positions use the saved maintenance runtime for hours, while draw count is derived from the live <code>data_set_csv</code> workspace. ${escapeHtml(runtimeSummary)}${previewCount ? ` · ${previewCount} preview markers fill empty lanes.` : ""}</p>
         </div>
         <div class="maintenance-header-timeline-tools">
-          <div class="maintenance-header-timeline-note">${lanes.reduce((sum, lane) => sum + lane.items.length, 0)} due tasks</div>
+          <div class="maintenance-header-timeline-note">${dueTaskCount} due tasks</div>
           <details class="maintenance-runtime-fold">
             <summary>Update hours</summary>
             <form class="maintenance-runtime-form" id="maintenance-runtime-form">
@@ -3314,7 +4459,7 @@ function maintenanceHeaderTimelineMarkup(data) {
               </label>
               <label>
                 <span>Draw</span>
-                <input type="number" step="1" name="drawCount" value="${escapeHtml(String(numericOr(runtime.draw_count, 0)))}" />
+                <input type="number" step="1" name="drawCount" value="${escapeHtml(String(numericOr(runtime.draw_count, 0)))}" readonly title="Auto-derived from the number of draw dataset CSV files in data_set_csv." />
               </label>
               <button class="mini-action" id="maintenance-runtime-save" type="button">Save</button>
             </form>
@@ -3337,7 +4482,7 @@ function maintenanceHeaderTimelineMarkup(data) {
                     <div class="maintenance-header-grid">
                       ${Array.from({ length: 6 }, () => `<span class="maintenance-header-grid-line"></span>`).join("")}
                     </div>
-                    ${maintenanceLaneItemsMarkup(lane, { demoSourceRows, demoNow })}
+                    ${maintenanceLaneItemsMarkup(lane, { demoSourceRows, demoNow, showPreviewItems })}
                   </div>
                 </div>
               </div>
@@ -3363,13 +4508,16 @@ function maintenanceModeLeadMarkup(mode, data, task) {
   }
   if (mode === "plan") {
     const scheduledCount = (data.execute_queue || []).filter((item) => String(item?.status || "").trim().toUpperCase() === "SCHEDULED").length;
-    const overdueCount = (data.tasks || []).filter((item) => maintenanceTaskLooksOverdue(item)).length;
+    const prepPoolTasks = maintenanceUniqueTasks(
+      (data.prep_queue || []).filter((item) => !maintenanceTaskIsPrepDone(item)),
+    );
+    const overduePrepPoolCount = prepPoolTasks.filter((item) => maintenanceTaskLooksOverdue(item)).length;
     return `
       <div class="maintenance-lead">
         <div class="maintenance-lead-copy">
           <span>Preparation flow</span>
           <strong>Use the next prep batch as the operating lane</strong>
-          <p>This step is about what the shift should prepare next, not every maintenance task in the system. ${scheduledCount} scheduled${overdueCount ? ` · ${overdueCount} overdue` : ""}.</p>
+          <p>This step is about what the shift should prepare next, not every maintenance task in the system. ${scheduledCount} scheduled${prepPoolTasks.length ? ` · ${prepPoolTasks.length} in prep pool` : ""}${overduePrepPoolCount ? ` · ${overduePrepPoolCount} overdue overall` : ""}.</p>
         </div>
       </div>
     `;
@@ -3517,7 +4665,9 @@ function maintenancePhotoGalleryMarkup(value, preparationValue = "", stepsValue 
                   .map(
                     (photo) => `
                       <figure class="maintenance-photo-thumb">
-                        <img src="${escapeHtml(photo.path)}" alt="${escapeHtml(photo.name || builderFileLabel(photo.path))}" loading="lazy" />
+                        <a class="maintenance-photo-link" href="${escapeHtml(photo.path)}" target="_blank" rel="noopener noreferrer">
+                          <img src="${escapeHtml(photo.path)}" alt="${escapeHtml(photo.name || builderFileLabel(photo.path))}" loading="lazy" />
+                        </a>
                         <figcaption>${escapeHtml(photo.name || builderFileLabel(photo.path))}</figcaption>
                       </figure>
                     `,
@@ -3541,7 +4691,9 @@ function maintenancePhotoGalleryMarkup(value, preparationValue = "", stepsValue 
                   .map(
                     (photo) => `
                       <figure class="maintenance-photo-thumb">
-                        <img src="${escapeHtml(photo.path)}" alt="${escapeHtml(photo.name || builderFileLabel(photo.path))}" loading="lazy" />
+                        <a class="maintenance-photo-link" href="${escapeHtml(photo.path)}" target="_blank" rel="noopener noreferrer">
+                          <img src="${escapeHtml(photo.path)}" alt="${escapeHtml(photo.name || builderFileLabel(photo.path))}" loading="lazy" />
+                        </a>
                         <figcaption>${escapeHtml(photo.name || builderFileLabel(photo.path))}</figcaption>
                       </figure>
                     `,
@@ -3598,7 +4750,9 @@ function maintenanceLinkedChecklistMarkup(title, value, prefix, photoValue, empt
                           .map(
                             (photo) => `
                               <figure class="maintenance-photo-thumb">
-                                <img src="${escapeHtml(photo.path || photo.preview)}" alt="${escapeHtml(photo.name || builderFileLabel(photo.path || photo.preview))}" loading="lazy" />
+                                <a class="maintenance-photo-link" href="${escapeHtml(photo.path || photo.preview)}" target="_blank" rel="noopener noreferrer">
+                                  <img src="${escapeHtml(photo.path || photo.preview)}" alt="${escapeHtml(photo.name || builderFileLabel(photo.path || photo.preview))}" loading="lazy" />
+                                </a>
                                 <figcaption>${escapeHtml(photo.name || builderFileLabel(photo.path || photo.preview))}</figcaption>
                               </figure>
                             `,
@@ -3688,21 +4842,20 @@ function maintenanceSanityTemplateSummaryMarkup(value, emptyMessage) {
   if (!items.length) {
     return `<div class="chart-empty">${escapeHtml(emptyMessage || "No sanity template saved yet.")}</div>`;
   }
+  const counts = items.reduce((acc, item) => {
+    const key = String(item.kind || "check").trim().toLowerCase() || "check";
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+  const parts = [];
+  if (counts.check) parts.push(`${counts.check} checklist`);
+  if (counts.passfail) parts.push(`${counts.passfail} pass / fail`);
+  if (counts.number) parts.push(`${counts.number} reading`);
+  if (counts.text) parts.push(`${counts.text} note`);
   return `
-    <div class="maintenance-sanity-summary">
-      ${items
-        .map(
-          (item) => `
-            <div class="maintenance-sanity-summary-row tone-${item.kind === "number" ? "info" : item.kind === "passfail" ? "warn" : "good"}">
-              <div class="maintenance-sanity-summary-copy">
-                <strong>${escapeHtml(item.label)}</strong>
-                <span>${escapeHtml(sanityTemplateKindLabel(item))}</span>
-              </div>
-              <em>${escapeHtml(sanityTemplatePreviewNote(item))}</em>
-            </div>
-          `,
-        )
-        .join("")}
+    <div class="maintenance-execute-readblock">
+      <span>Closeout flow</span>
+      <p>${escapeHtml(`${items.length} operator input${items.length === 1 ? "" : "s"} continue below${parts.length ? ` · ${parts.join(" · ")}` : ""}.`)}</p>
     </div>
   `;
 }
@@ -3823,6 +4976,24 @@ function maintenanceSanityGateMarkup(task) {
   `;
 }
 
+function maintenanceExecutePlanRows(data) {
+  return maintenanceUniqueTasks(
+    ([...(data.execute_queue || []), ...(data.execute_plan_queue || [])].filter((item) => {
+      const status = String(item?.status || "").trim().toUpperCase();
+      return ["SCHEDULED", "IN_PROGRESS"].includes(status)
+        && (Boolean(item?.plan_forwarded) || status === "SCHEDULED");
+    })),
+  ).sort((a, b) => {
+    const rank = { IN_PROGRESS: 0, SCHEDULED: 1 };
+    return (
+      (rank[String(a?.status || "").trim().toUpperCase()] ?? 9) -
+        (rank[String(b?.status || "").trim().toUpperCase()] ?? 9) ||
+      String(a?.component || "").localeCompare(String(b?.component || "")) ||
+      String(a?.task || "").localeCompare(String(b?.task || ""))
+    );
+  });
+}
+
 function maintenanceExecuteLauncherMarkup(data, activeMode = "", openTaskId = "", manualSearch = "", manualComponent = "") {
   const executeRows = (data.execute_queue || [])
     .filter((item) => ["SCHEDULED", "IN_PROGRESS"].includes(String(item?.status || "").trim().toUpperCase()))
@@ -3835,6 +5006,7 @@ function maintenanceExecuteLauncherMarkup(data, activeMode = "", openTaskId = ""
         String(a?.task || "").localeCompare(String(b?.task || ""))
       );
     });
+  const planRows = maintenanceExecutePlanRows(data);
   const scheduledCount = executeRows.filter((item) => String(item?.status || "").trim().toUpperCase() === "SCHEDULED").length;
   const inProgressCount = executeRows.filter((item) => String(item?.status || "").trim().toUpperCase() === "IN_PROGRESS").length;
   const options = [
@@ -3842,21 +5014,23 @@ function maintenanceExecuteLauncherMarkup(data, activeMode = "", openTaskId = ""
       key: "plan",
       eyebrow: "From plan",
       title: "Make tasks from plan step",
-      body: "Use the prepared batch as the source, then open the next execution function from that planned work.",
-      note: executeRows.length
-        ? `${inProgressCount} active · ${scheduledCount} scheduled in execute`
-        : `${(data.prep_queue || []).length} prep rows are ready to branch from`,
+      body: "Use only the tasks that were actually passed forward from the plan lane into execution.",
+      note: planRows.length
+        ? `${planRows.length} task${planRows.length === 1 ? "" : "s"} passed forward from plan`
+        : "Nothing has been passed forward from plan yet",
     },
     {
       key: "manual",
       eyebrow: "Manual start",
       title: "Execute manually",
       body: "Start a manual execution lane for work that needs to begin directly from the floor.",
-      note: "Best for urgent or operator-led execution",
+      note: executeRows.length
+        ? `${inProgressCount} active · ${scheduledCount} scheduled in execute`
+        : "Best for urgent or operator-led execution",
     },
   ];
   const selected = options.find((option) => option.key === activeMode);
-  const plannedRows = (executeRows.length ? executeRows : (data.prep_queue || [])).slice(0, 10);
+  const plannedRows = planRows.slice(0, 10);
   const manualRowsSource = data.tasks || [];
   const manualComponentOptions = Array.from(new Set(manualRowsSource.map((item) => item.component).filter(Boolean))).sort((a, b) => a.localeCompare(b));
   const manualNeedle = String(manualSearch || "").trim().toLowerCase();
@@ -3879,7 +5053,9 @@ function maintenanceExecuteLauncherMarkup(data, activeMode = "", openTaskId = ""
         <div class="maintenance-execute-plan-list">
           ${plannedRows
             .map(
-              (item) => `
+              (item) => {
+                const scheduleNote = (item.scheduled_window_labels || []).filter(Boolean)[0] || "";
+                return `
                 <div class="maintenance-execute-plan-row ${openTaskId === item.task_id ? "is-open" : ""}">
                   <button class="maintenance-execute-plan-item ${openTaskId === item.task_id ? "is-active" : ""}" type="button" data-maint-execute-task="${item.task_id}">
                     <div class="maintenance-execute-plan-item-copy">
@@ -3888,18 +5064,19 @@ function maintenanceExecuteLauncherMarkup(data, activeMode = "", openTaskId = ""
                       <p>${escapeHtml(item.task_group || item.flow_state || item.task_id || "")}</p>
                     </div>
                     <div class="maintenance-execute-plan-item-meta">
-                      <em>${(item.missing_parts || []).length ? `${item.missing_parts.length} missing` : "Parts ready"}</em>
+                      <em>${escapeHtml(scheduleNote || ((item.missing_parts || []).length ? `${item.missing_parts.length} missing` : "Passed from plan"))}</em>
                       <i class="status-badge tone-${toneForLabel(item.status || item.severity)}">${escapeHtml(item.status || item.severity || "Planned")}</i>
                     </div>
                   </button>
                   ${openTaskId === item.task_id ? `<div class="maintenance-execute-inline-detail">${maintenanceExecuteManualDetailMarkup(item)}</div>` : ""}
                 </div>
-              `,
+              `;
+              },
             )
             .join("")}
         </div>
       `
-    : `<div class="chart-empty">No planned tasks are ready to branch from the plan lane yet.</div>`;
+    : `<div class="chart-empty">No tasks have been passed forward from the plan lane yet.</div>`;
   const manualListMarkup = manualRows.length
     ? `
         <div class="maintenance-execute-plan-list">
@@ -4026,18 +5203,14 @@ function maintenanceExecuteManualInputFormMarkup(task) {
       <section class="maintenance-execute-manual-detail-card is-complete">
         <div class="chart-head">
           <span>Operator closeout</span>
-          <strong>No extra runtime fields are still open</strong>
+          <strong>Run the closeout checks below</strong>
         </div>
-        <p class="maintenance-execute-manual-note">This task already has its safety and stop setup from the builder package, so execute only needs the closeout checks below.</p>
+        <p class="maintenance-execute-manual-note">Package setup is already complete. Execute only needs the operator closeout checks below before you mark this task done.</p>
         <form class="maintenance-execute-manual-form" id="maintenance-execute-manual-form">
           <input type="hidden" name="taskId" value="${escapeHtml(task.task_id || "")}" />
           <input type="hidden" name="component" value="${escapeHtml(task.component || "")}" />
           <input type="hidden" name="task" value="${escapeHtml(task.task || "")}" />
           <section class="maintenance-execute-manual-closeout">
-            <div class="chart-head">
-              <span>Closeout inputs</span>
-              <strong>Run the operator boxes defined in the builder</strong>
-            </div>
             ${sanityRuntimeMarkup}
           </section>
           ${completionMarkup}
@@ -4049,7 +5222,7 @@ function maintenanceExecuteManualInputFormMarkup(task) {
     <section class="maintenance-execute-manual-detail-card">
       <div class="chart-head">
         <span>Operator closeout</span>
-        <strong>Only the fields that still belong in execute stay editable here</strong>
+        <strong>Complete the remaining runtime values and closeout checks</strong>
       </div>
       <p class="maintenance-execute-manual-note">Builder owns the package setup. Execute only asks for the remaining runtime values needed before this task can be closed.</p>
       <form class="maintenance-execute-manual-form" id="maintenance-execute-manual-form">
@@ -4086,10 +5259,6 @@ function maintenanceExecuteManualInputFormMarkup(task) {
             .join("")}
         </div>
         <section class="maintenance-execute-manual-closeout">
-          <div class="chart-head">
-            <span>Closeout inputs</span>
-            <strong>Run the operator boxes defined in the builder</strong>
-          </div>
           ${sanityRuntimeMarkup}
         </section>
         ${completionMarkup}
@@ -4117,13 +5286,25 @@ function maintenanceExecuteManualDetailMarkup(task) {
   const safetyProtocol = escapeHtml(wp.safety_protocol || task.safety_notes || "No safety protocol is stored yet.");
   const drawStopPlan = escapeHtml(wp.draw_stop_plan || "No draw stop plan is stored yet.");
   const completionCriteria = escapeHtml(wp.completion_criteria || "No acceptance criteria is stored yet.");
+  const manualLink = String(task.manual_link || "").trim();
+  const manualPageNumber = Number(task.manual_page || 0);
+  const manualOpenUrl = manualLink
+    ? `/api/maintenance/manual?path=${encodeURIComponent(manualLink)}${manualPageNumber > 0 ? `#page=${manualPageNumber}` : ""}`
+    : "";
+  const manualPagePdfUrl = manualLink && /\.pdf$/i.test(manualLink) && manualPageNumber > 0
+    ? `/api/maintenance/manual-page-pdf?path=${encodeURIComponent(manualLink)}&page=${manualPageNumber}`
+    : "";
+  const liveStatusLabel = isInProgress ? "Maintenance in progress" : "Ready to start";
+  const liveStatusNote = isInProgress
+    ? "This task is currently active on the tower."
+    : `Press Start task to make this live${statusLabel ? ` · queue state ${statusLabel}` : ""}.`;
   return `
     <div class="maintenance-execute-manual-detail">
       <section class="maintenance-execute-manual-detail-card is-hero">
         <div class="maintenance-execute-manual-detail-head">
           <span>Selected task</span>
-          <strong>${escapeHtml(task.component || "Task")}</strong>
-          <p>${escapeHtml(task.task || "Manual execution task")}</p>
+          <strong>${escapeHtml(task.task || task.component || "Task")}</strong>
+          <p>${escapeHtml(task.component ? `${task.component}${task.task_group ? ` · ${task.task_group}` : ""}` : "Manual execution task")}</p>
         </div>
         <div class="maintenance-execute-manual-detail-stats">
           <div class="maintenance-focus-stat tone-${wp.last_updated ? "good" : "warn"}">
@@ -4157,29 +5338,20 @@ function maintenanceExecuteManualDetailMarkup(task) {
           }
           <div class="maintenance-execute-manual-liveflag ${isInProgress ? "is-live" : ""}">
             <span>Tower status</span>
-            <strong>${isInProgress ? "Maintenance in progress" : `Waiting to start (${escapeHtml(statusLabel)})`}</strong>
+            <strong>${escapeHtml(liveStatusLabel)}</strong>
+            <em>${escapeHtml(liveStatusNote)}</em>
           </div>
         </div>
-      </section>
-      <section class="maintenance-execute-manual-detail-card is-wide">
-        <div class="chart-head">
-          <span>Procedure pack</span>
-          <strong>Prep and operator steps</strong>
-        </div>
-        ${maintenanceLinkedChecklistMarkup(
-          "Preparation checklist",
-          wp.preparation_checklist,
-          "prep",
-          wp.procedure_photos,
-          "No preparation checklist is stored yet.",
-        )}
-        ${maintenanceLinkedChecklistMarkup(
-          "Procedure steps",
-          wp.procedure_steps || task.procedure_summary,
-          "step",
-          wp.procedure_photos,
-          "No procedure steps are stored yet.",
-        )}
+        ${
+          manualOpenUrl || manualPagePdfUrl
+            ? `
+              <div class="maintenance-execute-manual-resource-actions">
+                ${manualOpenUrl ? `<a class="action-btn action-secondary" href="${manualOpenUrl}" target="_blank" rel="noopener noreferrer">Open linked manual</a>` : ""}
+                ${manualPagePdfUrl ? `<a class="action-btn action-secondary" href="${manualPagePdfUrl}" target="_blank" rel="noopener noreferrer">Create task PDF${manualPageNumber > 0 ? ` · p.${escapeHtml(String(manualPageNumber))}` : ""}</a>` : ""}
+              </div>
+            `
+            : ""
+        }
       </section>
       <section class="maintenance-execute-manual-detail-card is-wide">
         <div class="chart-head">
@@ -4214,6 +5386,26 @@ function maintenanceExecuteManualDetailMarkup(task) {
             <p>${drawStopPlan}</p>
           </div>
         </div>
+      </section>
+      <section class="maintenance-execute-manual-detail-card is-wide">
+        <div class="chart-head">
+          <span>Procedure pack</span>
+          <strong>Prep and operator steps</strong>
+        </div>
+        ${maintenanceLinkedChecklistMarkup(
+          "Preparation checklist",
+          wp.preparation_checklist,
+          "prep",
+          wp.procedure_photos,
+          "No preparation checklist is stored yet.",
+        )}
+        ${maintenanceLinkedChecklistMarkup(
+          "Procedure steps",
+          wp.procedure_steps || task.procedure_summary,
+          "step",
+          wp.procedure_photos,
+          "No procedure steps are stored yet.",
+        )}
       </section>
       <section class="maintenance-execute-manual-detail-card is-wide">
         <div class="chart-head">
@@ -4442,7 +5634,7 @@ function maintenanceStageMarkup(mode, data, task) {
   `;
 }
 
-function maintenanceModeContextMarkup(mode, data, selected, prepCutoffProgress = "", prepReadyProgress = "", prepFocusLaneKey = "", prepHorizonProgress = "", prepHorizonFoldOpen = false, prepStageKey = "need-prep", prepActionState = null) {
+function maintenanceModeContextMarkup(mode, data, selected, prepCutoffProgress = "", prepReadyProgress = "", prepFocusLaneKey = "", prepHorizonProgress = "", prepHorizonFoldOpen = false, prepStageKey = "need-prep", prepActionState = null, prepSelectedTaskIds = []) {
   if (mode === "builder") {
     return ``;
   }
@@ -4521,132 +5713,281 @@ function maintenanceModeContextMarkup(mode, data, selected, prepCutoffProgress =
           <span>Prep horizon</span>
           <strong>Prep timing map</strong>
         </div>
-        ${maintenancePrepHorizonMarkup(data.maintenance_events, "No maintenance windows scheduled right now.", data, selected?.task_id || "", prepCutoffProgress, prepReadyProgress, prepFocusLaneKey || (selected ? maintenanceTimelineLaneForTask(selected) : ""), prepHorizonProgress, prepHorizonFoldOpen, prepStageKey, prepActionState)}
+        ${maintenancePrepHorizonMarkup(data.maintenance_events, "No maintenance windows scheduled right now.", data, selected?.task_id || "", prepCutoffProgress, prepReadyProgress, prepFocusLaneKey || (selected ? maintenanceTimelineLaneForTask(selected) : ""), prepHorizonProgress, prepHorizonFoldOpen, prepStageKey, prepActionState, prepSelectedTaskIds)}
       </section>
     </div>
   `;
 }
 
-function maintenanceFaultsWorkspaceMarkup(data) {
+function maintenanceFaultsWorkspaceMarkup(data, editorState = "") {
+  const openFaults = data.faults_open || [];
+  const closedFaults = data.faults_closed || [];
+  const componentOptions = dedupeStrings([
+    ...(data.tasks || []).map((item) => item.component),
+    ...openFaults.map((item) => item.component),
+    ...closedFaults.map((item) => item.component),
+  ]).sort((left, right) => left.localeCompare(right));
+  const componentOptionsMarkup = componentOptions
+    .map((item) => `<option value="${escapeHtml(item)}"></option>`)
+    .join("");
+  const faultMetaLine = (fault) =>
+    [
+      String(fault.ts || "").trim(),
+      fault.related_draw ? `Draw ${fault.related_draw}` : "",
+      fault.source_file ? builderFileLabel(fault.source_file) : "",
+    ]
+      .filter(Boolean)
+      .map((item) => escapeHtml(item))
+      .join(" · ");
+  const faultLastActionLine = (fault) =>
+    [
+      fault.last_action_type ? `Last ${fault.last_action_type}` : "",
+      fault.last_action_ts || "",
+      fault.last_action_actor || "",
+    ]
+      .filter(Boolean)
+      .map((item) => escapeHtml(item))
+      .join(" · ");
+  const faultEditorMarkup = (fault, editorState) => {
+    const faultId = String(fault.fault_id || "").trim();
+    if (!faultId) return "";
+    const editKey = `edit:${faultId}`;
+    const noteKey = `note:${faultId}`;
+    const closeKey = `close:${faultId}`;
+    const reopenKey = `reopen:${faultId}`;
+    if (editorState === editKey) {
+      return `
+        <form class="maintenance-fault-inline-form" data-maint-fault-form="1">
+          <input type="hidden" name="action" value="edit" />
+          <input type="hidden" name="faultId" value="${escapeHtml(faultId)}" />
+          <div class="field-grid field-grid-2">
+            <label class="field-block">
+              <span>Component</span>
+              <input type="text" name="component" list="maintenance-fault-component-list" value="${escapeHtml(fault.component || "")}" required />
+            </label>
+            <label class="field-block">
+              <span>Severity</span>
+              <select name="severity">
+                ${["low", "medium", "high", "critical"]
+                  .map((item) => `<option value="${item}" ${String(fault.severity || "").toLowerCase() === item ? "selected" : ""}>${item}</option>`)
+                  .join("")}
+              </select>
+            </label>
+          </div>
+          <div class="field-grid field-grid-2">
+            <label class="field-block">
+              <span>Fault title</span>
+              <input type="text" name="title" value="${escapeHtml(fault.title || "")}" />
+            </label>
+            <label class="field-block">
+              <span>Related draw</span>
+              <input type="text" name="relatedDraw" value="${escapeHtml(fault.related_draw || "")}" />
+            </label>
+          </div>
+          <label class="field-block">
+            <span>Source file</span>
+            <input type="text" name="sourceFile" value="${escapeHtml(fault.source_file || "")}" />
+          </label>
+          <label class="field-block">
+            <span>Description</span>
+            <textarea name="description" rows="4">${escapeHtml(fault.description || "")}</textarea>
+          </label>
+          <div class="maintenance-fault-actions">
+            <button class="action-btn action-primary" type="submit">Save fault</button>
+            <button class="action-btn action-secondary" type="button" data-maint-fault-toggle="${escapeHtml(editKey)}">Cancel</button>
+          </div>
+        </form>
+      `;
+    }
+    if (editorState === noteKey) {
+      return `
+        <form class="maintenance-fault-inline-form" data-maint-fault-form="1">
+          <input type="hidden" name="action" value="note" />
+          <input type="hidden" name="faultId" value="${escapeHtml(faultId)}" />
+          <label class="field-block">
+            <span>Action note</span>
+            <textarea name="note" rows="4" placeholder="What was checked, what was found, what is next?"></textarea>
+          </label>
+          <div class="maintenance-fault-actions">
+            <button class="action-btn action-primary" type="submit">Save note</button>
+            <button class="action-btn action-secondary" type="button" data-maint-fault-toggle="${escapeHtml(noteKey)}">Cancel</button>
+          </div>
+        </form>
+      `;
+    }
+    if (editorState === closeKey) {
+      return `
+        <form class="maintenance-fault-inline-form" data-maint-fault-form="1">
+          <input type="hidden" name="action" value="close" />
+          <input type="hidden" name="faultId" value="${escapeHtml(faultId)}" />
+          <div class="field-grid field-grid-2">
+            <label class="field-block">
+              <span>Fix summary</span>
+              <input type="text" name="fixSummary" placeholder="Short closure summary" />
+            </label>
+            <label class="field-block">
+              <span>Close note</span>
+              <input type="text" name="note" placeholder="Why is this safe to close?" />
+            </label>
+          </div>
+          <div class="maintenance-fault-actions">
+            <button class="action-btn action-primary" type="submit">Close fault</button>
+            <button class="action-btn action-secondary" type="button" data-maint-fault-toggle="${escapeHtml(closeKey)}">Cancel</button>
+          </div>
+        </form>
+      `;
+    }
+    if (editorState === reopenKey) {
+      return `
+        <form class="maintenance-fault-inline-form" data-maint-fault-form="1">
+          <input type="hidden" name="action" value="reopen" />
+          <input type="hidden" name="faultId" value="${escapeHtml(faultId)}" />
+          <label class="field-block">
+            <span>Reopen note</span>
+            <textarea name="note" rows="3" placeholder="Why is the fault being reopened?"></textarea>
+          </label>
+          <div class="maintenance-fault-actions">
+            <button class="action-btn action-primary" type="submit">Reopen fault</button>
+            <button class="action-btn action-secondary" type="button" data-maint-fault-toggle="${escapeHtml(reopenKey)}">Cancel</button>
+          </div>
+        </form>
+      `;
+    }
+    return "";
+  };
+  const faultRowMarkup = (fault, editorState, { closed = false } = {}) => {
+    const faultId = String(fault.fault_id || "").trim();
+    const tone = toneForLabel(fault.severity || "medium");
+    return `
+      <article class="maintenance-task-row maintenance-fault-card tone-${tone}">
+        <div class="maintenance-task-main">
+          <div class="maintenance-task-head">
+            <strong>${escapeHtml(fault.component || "Unknown component")}</strong>
+            <span class="status-badge tone-${tone}">${escapeHtml(fault.severity || "medium")}</span>
+          </div>
+          <h3>${escapeHtml(fault.title || "Fault")}</h3>
+          ${fault.description ? `<p class="maintenance-fault-description">${escapeHtml(fault.description)}</p>` : ""}
+          ${faultMetaLine(fault) ? `<p class="maintenance-fault-meta">${faultMetaLine(fault)}</p>` : ""}
+          ${faultLastActionLine(fault) ? `<div class="maintenance-fault-lastaction">${faultLastActionLine(fault)}</div>` : ""}
+          ${(fault.last_fix || fault.last_note)
+            ? `
+              <div class="maintenance-fault-note">
+                ${fault.last_fix ? `<strong>${escapeHtml(fault.last_fix)}</strong>` : ""}
+                ${fault.last_note ? `<span>${escapeHtml(fault.last_note)}</span>` : ""}
+              </div>
+            `
+            : ""}
+        </div>
+        <div class="maintenance-fault-actions">
+          <button class="action-btn action-secondary" type="button" data-maint-fault-toggle="edit:${escapeHtml(faultId)}">Edit</button>
+          ${
+            closed
+              ? `<button class="action-btn action-secondary" type="button" data-maint-fault-toggle="reopen:${escapeHtml(faultId)}">Reopen</button>`
+              : `
+                <button class="action-btn action-secondary" type="button" data-maint-fault-toggle="note:${escapeHtml(faultId)}">Add note</button>
+                <button class="action-btn action-primary" type="button" data-maint-fault-toggle="close:${escapeHtml(faultId)}">Close</button>
+              `
+          }
+        </div>
+        ${faultEditorMarkup(fault, editorState)}
+      </article>
+    `;
+  };
   return `
-    <div class="maintenance-top-grid">
+    <datalist id="maintenance-fault-component-list">
+      ${componentOptionsMarkup}
+    </datalist>
+    <div class="maintenance-top-grid maintenance-faults-top-grid">
       <section class="chart-card maintenance-top-card">
         <div class="chart-head">
           <span>Fault monitor</span>
-          <strong>Recent fault events</strong>
-        </div>
-        <div class="stack-list">
-          ${(data.faults_recent || []).length
-            ? data.faults_recent.slice(0, 8).map((item) => `<div class="micro-row"><span>${item.component} — ${item.title}</span><strong>${item.severity}</strong></div>`).join("")
-            : `<div class="chart-empty">No recent faults logged.</div>`}
-        </div>
-      </section>
-      <section class="chart-card maintenance-top-card">
-        <div class="chart-head">
-          <span>Hotspots</span>
-          <strong>Fault pressure by component</strong>
-        </div>
-        <div class="stack-list">
-          ${(data.fault_hotspots || []).length
-            ? data.fault_hotspots.map((item) => `<div class="micro-row"><span>${item.component}</span><strong>${item.count}</strong></div>`).join("")
-            : `<div class="chart-empty">No component hotspots yet.</div>`}
-        </div>
-      </section>
-      <section class="chart-card maintenance-top-card">
-        <div class="chart-head">
-          <span>Action log</span>
-          <strong>Fault workflow activity</strong>
+          <strong>Open faults</strong>
         </div>
         <div class="metric-row compact">
-          <div class="metric-pill tone-bad"><span>Faults</span><strong>${(data.faults_recent || []).length}</strong></div>
+          <div class="metric-pill tone-bad"><span>Open faults</span><strong>${data.fault_open_total || 0}</strong></div>
+          <div class="metric-pill tone-bad"><span>Critical open</span><strong>${data.fault_open_critical_total || 0}</strong></div>
           <div class="metric-pill tone-info"><span>Actions logged</span><strong>${data.fault_actions_total || 0}</strong></div>
         </div>
+        <div class="stack-list">
+          ${openFaults.length
+            ? openFaults.slice(0, 8).map((item) => `<div class="micro-row"><span>${escapeHtml(item.component)} — ${escapeHtml(item.title)}</span><strong>${escapeHtml(item.severity)}</strong></div>`).join("")
+            : `<div class="chart-empty">No open faults right now.</div>`}
+        </div>
+      </section>
+      <section class="chart-card maintenance-top-card">
+        <div class="chart-head">
+          <span>Fault intake</span>
+          <strong>Log and update incidents directly here</strong>
+        </div>
+        <form id="maintenance-fault-create-form" class="maintenance-fault-inline-form maintenance-fault-create-form">
+          <div class="field-grid field-grid-2">
+            <label class="field-block">
+              <span>Component</span>
+              <input type="text" name="component" list="maintenance-fault-component-list" placeholder="Furnace / guide pulley / UV..." required />
+            </label>
+            <label class="field-block">
+              <span>Severity</span>
+              <select name="severity">
+                <option value="low">low</option>
+                <option value="medium" selected>medium</option>
+                <option value="high">high</option>
+                <option value="critical">critical</option>
+              </select>
+            </label>
+          </div>
+          <div class="field-grid field-grid-2">
+            <label class="field-block">
+              <span>Fault title</span>
+              <input type="text" name="title" placeholder="Short fault title" />
+            </label>
+            <label class="field-block">
+              <span>Related draw</span>
+              <input type="text" name="relatedDraw" placeholder="Optional draw ref" />
+            </label>
+          </div>
+          <label class="field-block">
+            <span>Source file</span>
+            <input type="text" name="sourceFile" placeholder="Optional source file / note origin" />
+          </label>
+          <label class="field-block">
+            <span>Description</span>
+            <textarea name="description" rows="4" placeholder="What happened, what was observed, and what should be checked next?"></textarea>
+          </label>
+          <div class="maintenance-fault-actions">
+            <button class="action-btn action-primary" type="submit">Log open fault</button>
+          </div>
+        </form>
       </section>
     </div>
-    <section class="maintenance-workspace">
+    <section class="maintenance-workspace maintenance-faults-workspace">
       <div class="maintenance-list-shell">
         <div class="chart-head">
-          <span>Fault list</span>
-          <strong>Recent fault events</strong>
+          <span>Open fault list</span>
+          <strong>Incidents waiting for action</strong>
         </div>
         <div class="stack-list">
-          ${(data.faults_recent || []).length
-            ? data.faults_recent.map((item) => `
-                <article class="maintenance-task-row tone-${toneForLabel(item.severity)}">
-                  <div class="maintenance-task-main">
-                    <div class="maintenance-task-head">
-                      <strong>${item.component || "Unknown component"}</strong>
-                      <span class="status-badge tone-${toneForLabel(item.severity)}">${item.severity}</span>
-                    </div>
-                    <h3>${item.title || "Fault"}</h3>
-                    <p>${item.ts || "Unknown time"}${item.related_draw ? ` · Draw ${item.related_draw}` : ""}</p>
-                  </div>
-                </article>
-              `).join("")
-            : `<div class="chart-empty">No recent faults logged.</div>`}
+          ${openFaults.length
+            ? openFaults.map((item) => faultRowMarkup(item, editorState)).join("")
+            : `<div class="chart-empty">No open faults right now.</div>`}
         </div>
+        ${closedFaults.length
+          ? collapsibleSection(
+              "Closed faults",
+              `
+                <div class="stack-list">
+                  ${closedFaults.map((item) => faultRowMarkup(item, editorState, { closed: true })).join("")}
+                </div>
+              `,
+              {
+                kind: "list",
+                tone: "neutral",
+                open: false,
+                meta: `${closedFaults.length} closed`,
+                className: "maintenance-fault-closed-fold",
+              },
+            )
+          : ""}
       </div>
-      <aside class="maintenance-detail-shell">
-        <div class="chart-head">
-          <span>Fault context</span>
-          <strong>What needs attention</strong>
-        </div>
-        <div class="micro-panel">This lane is for fault visibility and will be the next place to add direct fault actions and closure flow from the rebuild.</div>
-      </aside>
-    </section>
-  `;
-}
-
-function maintenanceCorrelationWorkspaceMarkup(data) {
-  return `
-    <div class="maintenance-top-grid">
-      <section class="chart-card maintenance-top-card">
-        <div class="chart-head">
-          <span>Correlation watch</span>
-          <strong>Faults tied to maintenance components</strong>
-        </div>
-        <div class="stack-list">
-          ${(data.correlation_watch || []).length
-            ? data.correlation_watch.slice(0, 8).map((item) => `<div class="micro-row"><span>${item.fault_component} — ${item.fault_title}</span><strong>${item.linked_task || "No linked task"}</strong></div>`).join("")
-            : `<div class="chart-empty">No current correlation watch items.</div>`}
-        </div>
-      </section>
-      <section class="chart-card maintenance-top-card">
-        <div class="chart-head">
-          <span>Maintenance windows</span>
-          <strong>Current intervention context</strong>
-        </div>
-        ${maintenanceTimelineMarkup(data.maintenance_events, "No maintenance windows scheduled right now.")}
-      </section>
-      <section class="chart-card maintenance-top-card">
-        <div class="chart-head">
-          <span>Blocked overlap</span>
-          <strong>Tasks likely connected to recent faults</strong>
-        </div>
-        <div class="stack-list">
-          ${(data.correlation_watch || []).filter((item) => item.linked_task).slice(0, 8).map((item) => `<div class="micro-row"><span>${item.linked_task}</span><strong>${item.linked_status || "Unknown"}</strong></div>`).join("") || `<div class="chart-empty">No linked task overlap right now.</div>`}
-        </div>
-      </section>
-    </div>
-    <section class="maintenance-workspace">
-      <div class="maintenance-list-shell">
-        <div class="chart-head">
-          <span>Correlation list</span>
-          <strong>Nearest maintenance + fault relationships</strong>
-        </div>
-        <div class="stack-list">
-          ${(data.correlation_watch || []).length
-            ? data.correlation_watch.map((item) => `<div class="micro-row"><span>${item.fault_component} — ${item.fault_title}</span><strong>${item.linked_task || "No task link"}</strong></div>`).join("")
-            : `<div class="chart-empty">No correlation items yet.</div>`}
-        </div>
-      </div>
-      <aside class="maintenance-detail-shell">
-        <div class="chart-head">
-          <span>Correlation detail</span>
-          <strong>Next investigation lane</strong>
-        </div>
-        <div class="micro-panel">This lane is ready for the next pass where we can add deeper correlation plots and outlier review, closer to the real app.</div>
-      </aside>
     </section>
   `;
 }
@@ -4697,6 +6038,16 @@ function orderDrawNoticeMarkup() {
     <div class="order-draw-notice tone-${orderDrawFlash.kind || "info"}">
       <strong>${orderDrawFlash.title || "Order Draw"}</strong>
       <span>${orderDrawFlash.message}</span>
+    </div>
+  `;
+}
+
+function drawFinalizeNoticeMarkup() {
+  if (!drawFinalizeFlash) return "";
+  return `
+    <div class="order-draw-notice tone-${drawFinalizeFlash.kind || "info"}">
+      <strong>${drawFinalizeFlash.title || "Draw Finalize"}</strong>
+      <span>${drawFinalizeFlash.message}</span>
     </div>
   `;
 }
@@ -5367,7 +6718,7 @@ function homeSelectorButton(panel, data) {
   `;
 }
 
-function homeHeroCoreMarkup(panelKey, data) {
+function homeHeroCoreMarkup(panelKey, data, previewOnly = false) {
   const meta = getHomePanelMeta(panelKey, data);
   const hideHeroValueCopy = ["draws", "schedule", "doneFailed", "maintenance", "parts"].includes(panelKey);
   return `
@@ -5406,11 +6757,25 @@ function getPrimaryLiveDraw(data) {
     || null;
 }
 
+function getCurrentScheduleEvent(data, typeFilter = null) {
+  const events = data.schedule?.expanded_events || [];
+  const now = new Date();
+  const filtered = typeFilter
+    ? events.filter((item) => String(item?.event_type || "").trim().toLowerCase() === String(typeFilter).trim().toLowerCase())
+    : events;
+  return filtered.find((item) => {
+    const start = item?.start ? new Date(item.start) : null;
+    const end = item?.end ? new Date(item.end) : null;
+    if (!(start instanceof Date) || Number.isNaN(start?.getTime?.())) return false;
+    if (!(end instanceof Date) || Number.isNaN(end?.getTime?.())) return false;
+    return start <= now && now <= end;
+  }) || null;
+}
+
 function getTowerStatusSummary(data) {
   const liveDraw = getPrimaryLiveDraw(data);
-  const upcoming = data.schedule.upcoming || [];
-  const upcomingMaintenance = upcoming.find((item) => item.event_type === "Maintenance");
-  const maintenanceCount = Number(data.schedule.type_counts.Maintenance ?? 0);
+  const maintenanceSnapshot = getHomeMaintenanceSnapshot(data);
+  const currentStopEvent = getCurrentScheduleEvent(data, "Stop");
   const openedOrders = Number((data.parts.status_counts || {}).Opened || 0);
   const lowStock = Number((data.inventory.low_stock || []).length || 0);
 
@@ -5428,25 +6793,40 @@ function getTowerStatusSummary(data) {
     };
   }
 
-  if (maintenanceCount > 0 || upcomingMaintenance) {
+  if (maintenanceSnapshot.activeCount > 0 && maintenanceSnapshot.activeTask) {
+    const activeTask = maintenanceSnapshot.activeTask;
     return {
       label: "Maintenance",
       tone: "bad",
-      primary: upcomingMaintenance ? (upcomingMaintenance.description || "Maintenance window") : "Maintenance watch",
-      secondary: upcomingMaintenance ? `${upcomingMaintenance.date_label} · ${upcomingMaintenance.start_label}` : `${maintenanceCount} maintenance events tracked`,
+      primary: activeTask.task || activeTask.component || "Maintenance in progress",
+      secondary: [activeTask.component, activeTask.task_group].filter(Boolean).join(" · ") || "Execute lane active",
       facts: [
         { label: "Opened orders", value: openedOrders, tone: openedOrders ? "bad" : "good" },
         { label: "Low stock", value: lowStock, tone: lowStock ? "bad" : "good" },
-        { label: "Schedule", value: maintenanceCount, tone: "warn" },
+        { label: "Active", value: maintenanceSnapshot.activeCount, tone: "bad" },
+      ],
+    };
+  }
+
+  if (currentStopEvent) {
+    return {
+      label: "Stop",
+      tone: "bad",
+      primary: currentStopEvent.description || "Tower stop in progress",
+      secondary: `${currentStopEvent.date_label || ""}${currentStopEvent.end_label ? ` · until ${currentStopEvent.end_label}` : ""}`.trim(),
+      facts: [
+        { label: "Opened orders", value: openedOrders, tone: openedOrders ? "bad" : "good" },
+        { label: "Low stock", value: lowStock, tone: lowStock ? "bad" : "good" },
+        { label: "Duration", value: `${Math.round(Number(currentStopEvent.duration_hours || 0) * 10) / 10}h`, tone: "bad" },
       ],
     };
   }
 
   return {
-    label: "Stop",
+    label: "No activity",
     tone: "good",
-    primary: "Tower is not drawing now",
-    secondary: `${data.draws.scheduled || 0} scheduled · ${data.draws.pending || 0} pending`,
+    primary: "No activity",
+    secondary: `${data.draws.scheduled || 0} scheduled draws · ${maintenanceSnapshot.overdueCount || 0} overdue maintenance`,
     facts: [
       { label: "Opened orders", value: openedOrders, tone: openedOrders ? "bad" : "good" },
       { label: "Pending", value: data.draws.pending || 0, tone: "warn" },
@@ -5466,7 +6846,7 @@ function homeStatusIndicatorMarkup(data) {
       <div class="home-status-main">
         <div class="home-status-signal">
           <i class="home-status-light tone-${status.tone}"></i>
-          <span>${status.label === "Draw" ? "Running now" : status.label === "Maintenance" ? "Service active" : "Tower idle"}</span>
+          <span>${status.label === "Draw" ? "Running now" : status.label === "Maintenance" ? "Service active" : status.label === "Stop" ? "Tower stopped" : "No activity"}</span>
         </div>
         <div class="home-status-primary">${status.primary}</div>
         ${status.secondary ? `<div class="home-status-secondary">${status.secondary}</div>` : ``}
@@ -6020,11 +7400,11 @@ async function renderOrderDrawPage(data) {
             <div class="order-builder-progress-steps">
               <button class="builder-progress-step is-active" type="button" data-builder-progress-step="required">
                 <span>Required</span>
-                <strong>0 / 6</strong>
+                <strong>0 / 7</strong>
               </button>
               <button class="builder-progress-step" type="button" data-builder-progress-step="targets">
                 <span>Targets</span>
-                <strong>0 / 8</strong>
+                <strong>0 / 9</strong>
               </button>
               <button class="builder-progress-step" type="button" data-builder-progress-step="materials">
                 <span>Materials</span>
@@ -6091,9 +7471,9 @@ async function renderOrderDrawPage(data) {
                   <span>Good zones count</span>
                   <input type="number" name="goodZones" min="1" step="1" value="1" />
                 </label>
-                <label class="field-block">
-                  <span>Desired date</span>
-                  <input type="date" name="desiredDate" />
+                <label class="field-block field-required">
+                  <span>Preform diameter (mm)</span>
+                  <input type="number" name="preformDiameterMm" min="0" step="0.01" required />
                 </label>
               </div>
               <div class="field-grid field-grid-3 conditional-geometry">
@@ -6115,33 +7495,33 @@ async function renderOrderDrawPage(data) {
             <div class="builder-panel" data-order-panel="targets">
               <div class="field-grid field-grid-3">
                 <label class="field-block field-required">
-                  <span>Fiber diameter (µm)</span>
+                  <span>Fiber diameter (um)</span>
                   <input type="number" name="fiberDiameter" min="0" step="0.01" />
                 </label>
                 <label class="field-block field-required">
-                  <span>Main coating diameter (µm)</span>
+                  <span>Main coating diameter (um)</span>
                   <input type="number" name="mainCoatingDiameter" min="0" step="0.01" />
                 </label>
                 <label class="field-block field-required">
-                  <span>Secondary coating diameter (µm)</span>
+                  <span>Secondary coating diameter (um)</span>
                   <input type="number" name="secondaryCoatingDiameter" min="0" step="0.01" />
                 </label>
               </div>
               <div class="field-grid field-grid-3">
                 <label class="field-block field-required">
-                  <span>Fiber tolerance (± µm)</span>
+                  <span>Fiber tolerance (± um)</span>
                   <input type="number" name="fiberTol" min="0" step="0.01" />
                 </label>
                 <label class="field-block field-required">
-                  <span>Main tolerance (± µm)</span>
+                  <span>Main tolerance (± um)</span>
                   <input type="number" name="mainTol" min="0" step="0.01" />
                 </label>
                 <label class="field-block field-required">
-                  <span>Secondary tolerance (± µm)</span>
+                  <span>Secondary tolerance (± um)</span>
                   <input type="number" name="secondaryTol" min="0" step="0.01" />
                 </label>
               </div>
-              <div class="field-grid field-grid-2">
+              <div class="field-grid field-grid-3">
                 <label class="field-block field-required">
                   <span>Tension (g)</span>
                   <input type="number" name="tension" min="0" step="0.1" />
@@ -6149,6 +7529,10 @@ async function renderOrderDrawPage(data) {
                 <label class="field-block field-required">
                   <span>Draw speed (m/min)</span>
                   <input type="number" name="drawSpeed" min="0" step="0.1" />
+                </label>
+                <label class="field-block field-required">
+                  <span>Furnace temperature (°C)</span>
+                  <input type="number" name="furnaceTemp" min="0" step="0.1" />
                 </label>
               </div>
             </div>
@@ -6207,7 +7591,7 @@ async function renderOrderDrawPage(data) {
                 </label>
                 <label class="field-block field-required">
                   <span>Duration (min)</span>
-                  <input type="number" name="scheduleDurationMin" min="1" step="5" value="480" />
+                  <input type="number" name="scheduleDurationMin" min="5" step="5" value="480" />
                 </label>
                 <label class="field-block field-required">
                   <span>Scheduling password</span>
@@ -6260,7 +7644,7 @@ async function renderOrderDrawPage(data) {
                     </label>
                     <label class="field-block field-required">
                       <span>Duration (min)</span>
-                      <input type="number" name="durationMin" min="1" step="5" value="480" required />
+                      <input type="number" name="durationMin" min="5" step="5" value="480" required />
                     </label>
                   </div>
                   <label class="field-block field-required">
@@ -6271,17 +7655,6 @@ async function renderOrderDrawPage(data) {
                 </form>
               </div>
             </details>
-            <div class="chart-card order-side-card">
-              <div class="chart-head">
-                <span>Project system</span>
-                <strong>Projects, templates</strong>
-              </div>
-              <div class="metric-row compact">
-                <div class="metric-pill tone-info"><span>Projects</span><strong>${data.project_count}</strong></div>
-                <div class="metric-pill tone-warn"><span>Template coverage</span><strong>${data.template_project_names.length}</strong></div>
-              </div>
-              <div class="token-list">${orderDrawProjectChips(data.project_names, data.template_project_names)}</div>
-            </div>
           </aside>
         </div>
     </section>
@@ -6437,6 +7810,7 @@ async function renderDashboardRebuildPage(data) {
 }
 
 async function renderDiagnosticsPage(data) {
+  const runtimeModeLabel = data.runtime_mode === "local-first" ? "Local-first runtime" : "Direct root runtime";
   const healthRows = (data.health_checks || [])
     .map(
       (item) => `
@@ -6453,23 +7827,37 @@ async function renderDiagnosticsPage(data) {
     .join("");
   const pathRows = data.path_rows
     .map(
-      (item) => `
-        <article class="diag-row tone-${item.status === "READY" ? "good" : "bad"}">
-          <div>
+      (item) => {
+        const localTone = item.status === "BLOCKED" ? "bad" : "good";
+        const globalTone = ["READY", "SYNCED", "LOCAL ONLY"].includes(item.global_status)
+          ? "good"
+          : ["SYNCING", "CONFIG ONLY", "WAITING"].includes(item.global_status)
+            ? "warn"
+            : "bad";
+        return `
+        <article class="diag-row tone-${localTone}">
+          <div class="diag-row-copy">
             <h3>${escapeHtml(item.label || item.key)}</h3>
-            <p>${escapeHtml(item.path)}</p>
+            <p><strong>Local</strong> · ${escapeHtml(item.path)}</p>
+            <p class="diag-row-substate tone-${localTone}">${escapeHtml(item.status || "READY")} · ${escapeHtml(item.local_detail || "")}</p>
+            <p><strong>Global</strong> · ${item.global_enabled ? escapeHtml(item.global_path || "Not set") : "Local only"}</p>
+            <p class="diag-row-substate tone-${globalTone}">${escapeHtml(item.global_status || "LOCAL ONLY")} · ${escapeHtml(item.global_detail || "No global mirror configured.")}</p>
           </div>
           <div class="diag-row-meta">
             <strong>${item.status}</strong>
             <span>${item.is_override ? "Custom override" : "Tower default"} · ${escapeHtml(item.modified)}</span>
+            <span>${escapeHtml(item.global_enabled ? `Mirror ${item.global_status}` : "Mirror off")}</span>
           </div>
         </article>
-      `,
+      `;
+      },
     )
     .join("");
   const pathEditorRows = data.path_rows
     .map(
       (item) => {
+        const localTone = item.status === "BLOCKED" ? "bad" : "good";
+        const globalTone = ["READY", "SYNCED", "LOCAL ONLY"].includes(item.global_status) ? "good" : item.global_status === "SYNCING" ? "warn" : "bad";
         const backupTools =
           item.key === "backups_dir"
             ? `
@@ -6485,10 +7873,15 @@ async function renderDiagnosticsPage(data) {
             : "";
         return `
         <label class="field-block diag-path-field ${item.key === "backups_dir" ? "is-backup" : ""}">
-          <span>${escapeHtml(item.label || item.key)}</span>
+          <span>${escapeHtml(item.label || item.key)} · Local runtime</span>
           <input type="text" name="${escapeHtml(item.key)}" value="${escapeHtml(item.path)}" placeholder="${escapeHtml(item.default_path || "")}" />
           <small>${item.is_override ? `Override active. Default: ${escapeHtml(item.default_path || "")}` : `Default path. ${escapeHtml(item.kind === "dir" ? "Folder" : "File")} target.`}</small>
-          <em class="diag-path-inline-state tone-${item.status === "READY" ? "good" : "bad"}">${item.status} · ${escapeHtml(item.kind === "dir" ? "folder" : "file")}</em>
+          <em class="diag-path-inline-state tone-${localTone}">${item.status} · ${escapeHtml(item.kind === "dir" ? "folder" : "file")}</em>
+          <small>${escapeHtml(item.local_detail || "")}</small>
+          <span class="diag-path-subhead">Global mirror (optional)</span>
+          <input type="text" name="global__${escapeHtml(item.key)}" value="${escapeHtml(item.global_path || "")}" placeholder="Leave blank to keep this lane local only" />
+          <small>${item.global_enabled ? escapeHtml(item.global_detail || "Global mirror configured.") : "If the global target is unavailable, the app still saves locally first and retries in the background."}</small>
+          <em class="diag-path-inline-state tone-${globalTone}">${escapeHtml(item.global_status || "LOCAL ONLY")}${item.global_pending_count ? ` · ${item.global_pending_count} queued` : ""}</em>
           ${backupTools}
         </label>
       `;
@@ -6534,7 +7927,10 @@ async function renderDiagnosticsPage(data) {
         <div class="metric-row">
           <div class="metric-pill tone-${data.overall_ok ? "good" : "warn"}"><span>Checks passed</span><strong>${data.passed_checks}</strong></div>
           <div class="metric-pill tone-good"><span>Ready paths</span><strong>${data.ready_count}</strong></div>
-          <div class="metric-pill tone-info"><span>Tracked paths</span><strong>${data.tracked_count}</strong></div>
+          <div class="metric-pill tone-info"><span>Path manager</span><strong>${data.tracked_count}</strong></div>
+          <div class="metric-pill tone-info"><span>Global mirrors</span><strong>${data.global_mirror_count || 0}</strong></div>
+          <div class="metric-pill tone-${Number(data.global_mirror_pending_count || 0) ? "warn" : "good"}"><span>Pending sync</span><strong>${data.global_mirror_pending_count || 0}</strong></div>
+          <div class="metric-pill tone-${Number(data.global_mirror_issue_count || 0) ? "bad" : "good"}"><span>Global issues</span><strong>${data.global_mirror_issue_count || 0}</strong></div>
           <div class="metric-pill tone-info"><span>Dataset CSVs</span><strong>${data.dataset_count}</strong></div>
           <div class="metric-pill tone-info"><span>Log CSVs</span><strong>${data.log_count}</strong></div>
           <div class="metric-pill tone-warn"><span>Backup snapshots</span><strong>${data.backup_snapshots}</strong></div>
@@ -6546,10 +7942,30 @@ async function renderDiagnosticsPage(data) {
           tone: data.overall_ok ? "good" : "warn",
           open: true,
         })}
-        ${collapsibleSection("Tracked paths", `
+        ${collapsibleSection("Full path manager", `
           <div class="diag-path-editor-shell">
-            <div class="micro-panel diag-path-editor-note">Update file and folder locations here. Saves apply immediately to the Python app and stay persisted in <code>state/tracked_path_overrides.json</code>. Use absolute paths or paths relative to the Tower workspace root.</div>
+            <div class="micro-panel diag-path-editor-note">
+              <strong>What to set</strong>: in the real deployment the shared global mirror is usually already set once for everyone. On each machine, the important part is the local runtime for that OS user.
+              <br />
+              <strong>How local works</strong>: the app takes the current OS user, enters that user’s <code>Documents</code> folder, and uses <code>documents-cache_tower</code> as the local runtime root. On Windows that means a path like <code>C:/Users/&lt;user&gt;/Documents/documents-cache_tower</code>. If the folder is missing, the app creates it automatically on first run, then adds the normal folders after it like <code>data</code>, <code>maintenance</code>, <code>logs</code>, <code>reports</code>, and <code>state</code>.
+              <br />
+              <strong>What to do on a new computer</strong>: 1. Open this page on that machine. 2. Check that the local runtime paths point to the correct local user area. 3. Click <code>Save path changes</code> only if you changed the local paths. Touch <code>Global mirror root</code> only when the shared deployment location itself has changed.
+              <br />
+              <strong>Use the per-path global fields only</strong> when one lane must mirror somewhere different from the normal shared Tower tree. Local runtime overrides stay per OS user, while the global mirror settings stay shared for the deployment.
+            </div>
             <form id="diagnostics-path-form" class="diag-path-editor">
+              <div class="diag-root-grid">
+                <label class="field-block diag-root-field">
+                  <span>Resolved local runtime root</span>
+                  <input type="text" value="${escapeHtml(data.runtime_root || "")}" readonly />
+                  <small>${escapeHtml(runtimeModeLabel)}. Auto local default on this machine: ${escapeHtml(data.default_local_root || "")}</small>
+                </label>
+                <label class="field-block diag-root-field">
+                  <span>Global mirror root (optional)</span>
+                  <input type="text" name="globalRoot" value="${escapeHtml(data.global_root || "")}" placeholder="Example: Z:\\TowerWork or /mnt/tower/Tower_work" />
+                  <small>If set, matching runtime folders like <code>data</code>, <code>maintenance</code>, <code>logs</code>, <code>reports</code>, and <code>state</code> mirror under this one parent path automatically. This shared setting is common for everyone using the deployment.</small>
+                </label>
+              </div>
               <div class="diag-path-editor-grid">${pathEditorRows}</div>
               <div class="parts-form-actions diag-path-actions">
                 <button class="action-btn action-primary" type="submit">Save path changes</button>
@@ -6560,7 +7976,7 @@ async function renderDiagnosticsPage(data) {
           </div>
         `, {
           kind: "list",
-          meta: data.override_count ? `${data.path_rows.length} paths · ${data.override_count} custom` : `${data.path_rows.length} paths`,
+          meta: data.override_count ? `${data.path_rows.length} live paths · ${data.override_count} custom` : `${data.path_rows.length} live paths`,
           tone: data.ready_count === data.tracked_count ? "good" : "warn",
           open: false,
         })}
@@ -6606,7 +8022,7 @@ function bindDiagnosticsPage() {
     }
   });
   resetButton?.addEventListener("click", async () => {
-    const confirmed = window.confirm("Reset all tracked diagnostics paths back to the Tower defaults?");
+    const confirmed = window.confirm("Reset all local runtime paths and clear all global mirror paths back to the Tower defaults?");
     if (!confirmed) return;
     clearError();
     try {
@@ -6766,7 +8182,7 @@ function renderMiniMarkdown(source) {
 function attachmentListMarkup(raw) {
   const items = String(raw || "")
     .split(";")
-    .map((item) => item.trim())
+    .map((item) => sanitizeAttachmentPath(item))
     .filter(Boolean);
   if (!items.length) return "";
   const attachmentTypeLabel = (item) => {
@@ -6785,26 +8201,47 @@ function attachmentListMarkup(raw) {
     return name.slice(dotIndex + 1).slice(0, 5).toUpperCase();
   };
   return `
-    <div class="development-attachment-grid is-compact">
+    <div class="development-attachment-grid is-gallery">
       ${items
         .map((item) => {
-          const href = `/api/development/media?path=${encodeURIComponent(item)}`;
-          const lower = item.toLowerCase();
+          const safeItem = sanitizeAttachmentPath(item);
+          const safeName = basenameSafe(safeItem);
+          const href = `/api/development/media?path=${encodeURIComponent(safeItem)}`;
+          const previewHref = `/api/development/media-preview?path=${encodeURIComponent(safeItem)}`;
+          const lower = safeItem.toLowerCase();
           const isImage = /\.(png|jpg|jpeg|gif|webp|bmp)$/i.test(lower);
+          const isPdf = lower.endsWith(".pdf");
           return `
-            <div class="development-attachment-card ${isImage ? "is-image" : "is-doc"}">
+            <div class="development-attachment-card ${isImage ? "is-image" : isPdf ? "is-pdf" : "is-doc"}">
               ${isImage ? `
-                <a class="development-attachment-thumb" href="${href}" target="_blank" rel="noopener noreferrer">
-                  <img src="${href}" alt="${basenameSafe(item)}" loading="lazy" />
+                <a class="development-attachment-media development-attachment-thumb" href="${previewHref}" rel="noopener noreferrer">
+                  <img src="${previewHref}" alt="${safeName}" loading="lazy" />
                 </a>
-              ` : `<div class="development-attachment-badge">${attachmentBadge(item)}</div>`}
+              ` : isPdf ? `
+                <a class="development-attachment-media development-attachment-pdf-media" href="${previewHref}" rel="noopener noreferrer">
+                  <img
+                    class="development-attachment-pdf-preview"
+                    src="${previewHref}"
+                    alt="${safeName}"
+                    loading="lazy"
+                  />
+                  <div class="development-attachment-pdf-overlay">
+                    <span class="development-attachment-badge">PDF</span>
+                    <strong>Inline preview</strong>
+                  </div>
+                </a>
+              ` : `
+                <div class="development-attachment-doc-head">
+                  <div class="development-attachment-badge">${attachmentBadge(item)}</div>
+                </div>
+              `}
               <div class="development-attachment-copy">
-                <strong>${basenameSafe(item)}</strong>
-                <span>${attachmentTypeLabel(item)}</span>
+                <strong>${safeName}</strong>
+                <span>${attachmentTypeLabel(safeItem)}</span>
               </div>
               <div class="development-attachment-actions">
-                ${isImage ? `<a class="action-btn action-secondary" href="${href}" target="_blank" rel="noopener noreferrer">Preview</a>` : ""}
-                <a class="action-btn action-secondary" href="${href}" target="_blank" rel="noopener noreferrer">Open file</a>
+                ${(isImage || isPdf) ? `<a class="action-btn action-secondary" href="${previewHref}" rel="noopener noreferrer">Preview</a>` : ""}
+                <a class="action-btn action-secondary" href="${href}" rel="noopener noreferrer">Open file</a>
               </div>
             </div>
           `;
@@ -6817,7 +8254,7 @@ function attachmentListMarkup(raw) {
 function attachmentInlineLinksMarkup(raw) {
   const items = String(raw || "")
     .split(";")
-    .map((item) => item.trim())
+    .map((item) => sanitizeAttachmentPath(item))
     .filter(Boolean);
   if (!items.length) return "";
   return `
@@ -6826,7 +8263,7 @@ function attachmentInlineLinksMarkup(raw) {
         .slice(0, 8)
         .map(
           (item) =>
-            `<a class="file-link development-inline-file" href="/api/development/media?path=${encodeURIComponent(item)}" target="_blank" rel="noopener noreferrer">${basenameSafe(item)}</a>`,
+            `<a class="file-link development-inline-file" href="/api/development/media?path=${encodeURIComponent(item)}" rel="noopener noreferrer">${basenameSafe(item)}</a>`,
         )
         .join("")}
     </div>
@@ -7146,17 +8583,10 @@ async function renderReportCenterPage(data) {
         </div>
       </div>
       <div class="report-mode-panel" data-report-panel="Recent Exports">
-        <div class="report-export-grid">
+        <div class="report-export-grid report-export-grid-single">
           <section class="chart-card">
             <div class="chart-head">
-              <span>PDF exports</span>
-              <strong>Historical output</strong>
-            </div>
-            ${exportFileRowsMarkup(data.recent_pdf_exports)}
-          </section>
-          <section class="chart-card">
-            <div class="chart-head">
-              <span>Markdown exports</span>
+              <span>Recent exports</span>
               <strong>Rebuild output</strong>
             </div>
             ${exportFileRowsMarkup(data.recent_md_exports)}
@@ -7427,7 +8857,7 @@ async function renderSqlLabPage(data) {
                 <strong>Trim the list to the metric family you want to compare</strong>
               </div>
               <div class="sql-quick-row">
-                ${sqlToggleTileMarkup({ id: "sql-only-avg", title: "Only Avg", copy: "Average metrics only", checked: true })}
+                ${sqlToggleTileMarkup({ id: "sql-only-avg", title: "Only Avg", copy: "Average metrics only" })}
                 ${sqlToggleTileMarkup({ id: "sql-only-min", title: "Only Min", copy: "Minimum metrics only" })}
                 ${sqlToggleTileMarkup({ id: "sql-only-max", title: "Only Max", copy: "Maximum metrics only" })}
               </div>
@@ -7637,6 +9067,7 @@ async function renderSqlLabPage(data) {
         <div class="order-builder-actions sql-analysis-actions">
           <button class="action-btn action-secondary" type="button" id="sql-plot-all-matched">Set plot = all matched params</button>
           <button class="action-btn action-secondary" type="button" id="sql-plot-clear">Clear plot selection</button>
+          <button class="action-btn action-secondary" type="button" id="sql-plot-restore-hidden" disabled>Restore hidden outliers</button>
           <label class="field-block sql-analysis-reducer">
             <span>Group reducer</span>
             <select id="sql-analysis-reducer">
@@ -7650,7 +9081,13 @@ async function renderSqlLabPage(data) {
         <div class="sql-analysis-resource-strip">
           <button class="parts-filter-chip is-active" type="button" data-sql-analysis-source="filter">Use filter-hit values</button>
           <button class="parts-filter-chip" type="button" data-sql-analysis-source="draws">Use all rows from matched draws</button>
-          <div id="sql-analysis-resource-root" class="micro-panel sql-analysis-resource-note">Plot and math are reading only the values that passed the current filter.</div>
+        </div>
+        <div class="sql-analysis-browser">
+          <label class="field-block sql-analysis-search">
+            <span>Plot search</span>
+            <input id="sql-analysis-search" type="text" placeholder="Search matched draw parameters before showing the plot board..." />
+          </label>
+          <div id="sql-analysis-search-note" class="sql-analysis-search-note">Ready to browse grouped parameters.</div>
         </div>
         <div class="sql-analysis-hero-top">
           <div id="sql-analysis-series-root" class="token-list"></div>
@@ -7661,13 +9098,16 @@ async function renderSqlLabPage(data) {
           <canvas id="sql-analysis-canvas" class="sql-analysis-canvas sql-analysis-canvas-large"></canvas>
           <div id="sql-analysis-tooltip" class="sql-analysis-tooltip"></div>
         </div>
+        <div id="sql-analysis-detail-root" class="sql-analysis-detail-root">
+          <div class="micro-panel">Click a point or event to inspect the related draw and CSV rows here.</div>
+        </div>
         </div>
       `, { kind: "workspace", meta: "grouped parameter plot", tone: "info", open: false })}
         ${collapsibleSection("Math lab", `
         <div id="sql-math-lab" class="sql-math-lab">
           <div class="sql-help-band sql-help-band-soft">
             <span>Math workflow</span>
-            <strong>Choose one or two grouped traces, then build a derived signal like spread, ratio, rolling average, or delta. Click the derived curve to inspect the related draw below.</strong>
+            <strong>Choose one or two grouped traces, then build a derived signal like spread, ratio, rolling average, delta, or a custom <code>f(A,B)</code> formula. Click the derived curve to inspect the related draw below.</strong>
           </div>
           <div class="field-grid field-grid-4 sql-math-controls">
             <label class="field-block">
@@ -7689,12 +9129,22 @@ async function renderSqlLabPage(data) {
                 <option value="percent_ab">A vs B %</option>
                 <option value="normalize">Normalize A</option>
                 <option value="zscore">Z-score A</option>
+                <option value="custom_ab">Custom f(A,B)</option>
               </select>
             </label>
             <label class="field-block">
-              <span>Window</span>
-              <input id="sql-math-window" type="number" min="2" max="20" step="1" value="3" />
+              <span>Formula f(A,B)</span>
+              <input id="sql-math-expression" type="text" value="A" placeholder="np.sqrt(np.abs(A-B))" />
             </label>
+          </div>
+          <div class="sql-math-formula-note">
+            <span>NumPy-style examples</span>
+            <button class="parts-filter-chip" type="button" data-sql-math-expression-example="np.sqrt(np.abs(A-B))">np.sqrt(np.abs(A-B))</button>
+            <button class="parts-filter-chip" type="button" data-sql-math-expression-example="np.power(A,2)">np.power(A,2)</button>
+            <button class="parts-filter-chip" type="button" data-sql-math-expression-example="np.log(np.abs(A)+1)">np.log(np.abs(A)+1)</button>
+            <button class="parts-filter-chip" type="button" data-sql-math-expression-example="np.maximum(A,B)-np.minimum(A,B)">np.maximum(A,B)-np.minimum(A,B)</button>
+            <button class="parts-filter-chip" type="button" data-sql-math-expression-example="np.exp((A-B)/100)">np.exp((A-B)/100)</button>
+            <em>Supports np.abs, np.sqrt, np.power, np.log, np.exp, np.minimum, np.maximum. Rolling avg uses a fixed 5-point window.</em>
           </div>
           <div class="token-strip sql-math-preset-strip" id="sql-math-presets">
             <button class="parts-filter-chip" type="button" data-sql-math-preset="identity">Use A</button>
@@ -7705,6 +9155,7 @@ async function renderSqlLabPage(data) {
             <button class="parts-filter-chip" type="button" data-sql-math-preset="percent_ab">A vs B %</button>
             <button class="parts-filter-chip" type="button" data-sql-math-preset="normalize">Normalize</button>
             <button class="parts-filter-chip" type="button" data-sql-math-preset="zscore">Z-score</button>
+            <button class="parts-filter-chip" type="button" data-sql-math-preset="custom_ab">Custom f(A,B)</button>
           </div>
           <div class="order-builder-actions sql-math-actions">
             <button class="action-btn action-secondary" type="button" id="sql-math-save-recipe">Add current recipe</button>
@@ -7719,14 +9170,15 @@ async function renderSqlLabPage(data) {
           </div>
         </div>
       `, { kind: "workspace", meta: "derived trace studio", tone: "info", open: false })}
-        <div id="sql-analysis-detail-root" class="sql-analysis-detail-root">
-          <div class="micro-panel">Click a point or event to inspect the related draw and CSV rows here.</div>
-        </div>
         ${collapsibleSection("Dataset rows preview", `<div id="sql-preview-root">${sqlPreviewRowsMarkup([])}</div>`, { kind: "list", meta: "dataset", tone: "info", open: false })}
-        ${collapsibleSection("Matched draws", `<div id="sql-matched-draws-root">${sqlMatchedDrawsMarkup([])}</div>`, { kind: "list", meta: "draws", tone: "good", open: true })}
+        ${collapsibleSection("Matched draws", `<div id="sql-matched-draws-root">${sqlMatchedDrawsMarkup([])}</div>`, { kind: "list", meta: "draws", tone: "good", open: false })}
         ${collapsibleSection("Matched values", `<div id="sql-matched-values-root">${sqlPreviewRowsMarkup([])}</div>`, { kind: "list", meta: "values", tone: "info", open: false })}
         ${collapsibleSection("Maintenance events", `<div id="sql-maintenance-results-root">${sqlEventRowsMarkup([], "maintenance events")}</div>`, { kind: "list", meta: "maintenance", tone: "warn", open: false })}
         ${collapsibleSection("Fault events", `<div id="sql-fault-results-root">${sqlEventRowsMarkup([], "fault events")}</div>`, { kind: "list", meta: "faults", tone: "bad", open: false })}
+        <div class="order-builder-actions sql-results-export-bar sql-results-export-bar-end">
+          <button class="action-btn action-secondary" type="button" id="sql-export-results-btn">Download matched results CSV</button>
+          <div id="sql-export-status" class="sql-export-status">Run a filter, then export the matched draw set and condition parameters as a CSV.</div>
+        </div>
       </div>
     </section>
   `;
@@ -7749,24 +9201,66 @@ async function renderConsumablesPage(data) {
           </div>
           <div class="consumable-tank-grid">
             ${(data.containers || [])
-              .map(
-                (item) => `
-                  <div class="consumable-tank ${item.low ? "is-low" : ""}">
+              .map((item) => {
+                const liveState = String(item.live_state || "live").trim() || "live";
+                const isLive = liveState === "live";
+                const isStale = liveState === "stale";
+                const fillPercent = Number(item.fill_percent || 0);
+                const fillState = !isLive ? (isStale ? "stale" : "offline") : fillPercent <= 10 ? "alert" : fillPercent <= 20 ? "warn" : "good";
+                const statusText = isLive ? "Live signal" : isStale ? "Stale feed" : "Not connected";
+                const primaryText = isLive ? `${fillPercent.toFixed(1)}%` : isStale ? "STALE" : "OFFLINE";
+                const readingText = isLive
+                  ? `${Number(item.level || 0).toFixed(1)} kg · ${Number(item.volume_l || 0).toFixed(1)} L`
+                  : isStale
+                    ? "Last tank sample is too old"
+                    : "Waiting for feeder / logger signal";
+                const metaText = isLive
+                  ? `${escapeHtml(item.sensor_column || "")} · ${escapeHtml(item.updated_at || "No sample yet")}`
+                  : item.updated_at
+                    ? `${escapeHtml(item.sensor_column || "")} · last ${escapeHtml(item.updated_at)}`
+                    : `${escapeHtml(item.sensor_column || "")} · no sample yet`;
+                return `
+                  <div class="consumable-tank is-${fillState}">
                     <span>${item.label}</span>
-                    <strong>${item.level} kg</strong>
+                    <small class="consumable-tank-badge">${statusText}</small>
+                    <strong class="consumable-tank-primary">${primaryText}</strong>
+                    <small class="consumable-tank-reading">${readingText}</small>
                     <em>${item.type}</em>
+                    <small class="consumable-tank-meta">${metaText}</small>
                   </div>
-                `,
-              )
+                `;
+              })
               .join("")}
           </div>
+          ${collapsibleSection(
+            "Update live fill setup",
+            consumablesContainerEditorMarkup(data),
+            {
+              kind: "list",
+              meta: `${(data.container_editor_rows || []).length} stations`,
+              tone: "info",
+              open: false,
+              className: "consumables-container-fold",
+            },
+          )}
         </section>
         <section class="chart-card">
           <div class="chart-head">
-            <span>Stock by type</span>
-            <strong>Warehouse coating stock (kg)</strong>
+            <span>Inventory by type</span>
+            <strong>Warehouse + loaded containers (kg)</strong>
           </div>
           ${barChartMarkup(data.stock_rows || [])}
+          ${collapsibleSection(
+            "Update warehouse + minimum stock",
+            consumablesStockEditorMarkup(data.stock_editor_rows || data.stock_rows || []),
+            {
+              kind: "list",
+              meta: `${(data.stock_editor_rows || data.stock_rows || []).length} types`,
+              tone: "info",
+              open: false,
+              className: "consumables-stock-fold",
+            },
+          )}
         </section>
       </div>
       <section class="chart-card consumables-temperature-card">
@@ -7779,16 +9273,20 @@ async function renderConsumablesPage(data) {
       ${collapsibleSection("Coating guide", `
         <div class="micro-panel">Use this as a quick operator guide for what each coating is, what it is used for, and whether stock is getting low.</div>
         ${consumablesCoatingGuideMarkup(data.coating_rows || [])}
+        ${consumablesCoatingEditorMarkup(data.coating_rows || [])}
       `, { kind: "list", meta: `${(data.coating_rows || []).length} coatings`, tone: "info", open: false })}
       ${collapsibleSection("Dies setup", `
         <form id="consumables-dies-form" class="stack-form">
-          <div class="micro-panel">Set the live die sizes here in <strong>um</strong>. This uses the same real dies config as the app and saves only the real fields: <strong>Entry</strong> and <strong>Primary</strong>.</div>
+          <div class="micro-panel">Set the live station names and die sizes here in <strong>um</strong>. This uses the same real dies config as the app and saves the station label plus the real die fields: <strong>Entry</strong> and <strong>Primary</strong>.</div>
           <div class="micro-list consumables-dies-editor">
             ${(data.dies_rows || [])
               .map((item, index) => `
                 <div class="consumables-die-row">
-                  <input type="hidden" name="station" value="${item.station}" />
-                  <strong>${item.station}</strong>
+                  <input type="hidden" name="original_station_${index}" value="${escapeHtml(item.station_key || item.station)}" />
+                  <label class="field-block consumables-die-station-field">
+                    <span>Station</span>
+                    <input type="text" name="station_name_${index}" value="${escapeHtml(item.station)}" />
+                  </label>
                   <label class="field-block">
                     <span>Entry (um)</span>
                     <input type="number" name="entry_die_um_${index}" value="${item.entry_die_um}" step="0.1" />
@@ -7797,10 +9295,6 @@ async function renderConsumablesPage(data) {
                     <span>Primary (um)</span>
                     <input type="number" name="primary_die_um_${index}" value="${item.primary_die_um}" step="0.1" />
                   </label>
-                  <div class="micro-panel consumables-die-state">
-                    <strong>${item.primary_on_tower ? "Primary on tower" : "Primary off tower"}</strong>
-                    <p>${item.secondary_on_tower ? "Secondary lane active" : "Secondary lane idle"}</p>
-                  </div>
                 </div>
               `)
               .join("")}
@@ -7825,6 +9319,18 @@ function processSetupNumber(map, key, fallback = "") {
   return raw === "" ? fallback : raw;
 }
 
+const PROCESS_SETUP_IRIS_TARGET_GAP_MM2 = 200;
+const PROCESS_SETUP_IRIS_OPTIONS_MM = Array.from({ length: 45 }, (_, index) => 18 + (index * 0.5));
+
+function normalizeProcessSetupIrisShape(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) return "Circular";
+  if (text === "tiger cut" || text.includes("tiger")) return "Tiger Cut";
+  if (text === "octagonal" || text.includes("oct")) return "Octagonal";
+  if (text === "panda - pm" || text.includes("panda")) return "PANDA - PM";
+  return "Circular";
+}
+
 function processSetupTempMeasuredMarkup(label, value, sampledAt = "") {
   const numeric = Number(value);
   const hasValue = Number.isFinite(numeric);
@@ -7844,6 +9350,10 @@ async function renderProcessSetupPage(data) {
   const setupOptions = data.setup_options || {};
   const tempContext = data.temp_context || {};
   const scheduledCount = Number((data.metrics || {}).scheduled ?? (data.scheduled_orders || []).length ?? 0);
+  const currentIrisShape = normalizeProcessSetupIrisShape(
+    processSetupText(processMap, "Preform Shape", processSetupText(orderMap, "Fiber Geometry Type", "Circular")) || "Circular",
+  );
+  const currentPmIris = processSetupText(processMap, "PM Iris System", "") === "1" || currentIrisShape === "PANDA - PM";
   return `
     <section class="page-panel process-setup-page" id="process-setup-page">
       <div class="section-heading" ${titleBandStyle("title-photo-b.jpeg", "52% center")}>
@@ -7941,10 +9451,14 @@ async function renderProcessSetupPage(data) {
               <span>Coating</span>
               <strong>Core coating setup values</strong>
             </div>
-            <div class="field-grid field-grid-2">
+            <div class="field-grid field-grid-3">
               <label class="field-block">
                 <span>Entry fiber diameter (µm)</span>
                 <input type="number" id="ps-entry-fiber" value="${processSetupNumber(processMap, "Entry Fiber Diameter", processSetupNumber(orderMap, "Fiber Diameter (µm)", ""))}" step="0.1" />
+              </label>
+              <label class="field-block">
+                <span>Furnace temperature (°C)</span>
+                <input type="number" id="ps-furnace-temp" value="${processSetupNumber(processMap, "Furnace Temperature", processSetupNumber(orderMap, "Furnace Temperature (°C)", ""))}" step="0.1" />
               </label>
               <label class="field-block">
                 <span>Draw speed (m/min)</span>
@@ -8015,6 +9529,7 @@ async function renderProcessSetupPage(data) {
                 </select>
               </label>
             </div>
+            <div id="ps-die-auto-summary" class="micro-panel blocky"></div>
           </section>
 
           <section class="chart-card tight stack-form">
@@ -8027,20 +9542,19 @@ async function renderProcessSetupPage(data) {
                 <span>Preform shape</span>
                 <select id="ps-iris-shape">
                   ${["Circular", "Tiger Cut", "Octagonal", "PANDA - PM"].map((item) => {
-                    const current = processSetupText(processMap, "Preform Shape", processSetupText(orderMap, "Fiber Geometry Type", "Circular")) || "Circular";
-                    return `<option value="${item}" ${item === current ? "selected" : ""}>${item}</option>`;
+                    return `<option value="${item}" ${item === currentIrisShape ? "selected" : ""}>${item}</option>`;
                   }).join("")}
                 </select>
               </label>
               <label class="field-block">
-                <span>Selected iris diameter (mm)</span>
-                <input type="number" id="ps-iris-selected" value="${processSetupNumber(processMap, "Selected Iris Diameter", "")}" step="0.1" />
+                <span>Calculated iris diameter (mm)</span>
+                <input type="number" id="ps-iris-selected" value="${processSetupNumber(processMap, "Selected Iris Diameter", "")}" step="0.5" readonly />
               </label>
             </div>
             <div class="field-grid field-grid-3">
-              <label class="field-block">
+              <label class="field-block field-required">
                 <span>Preform diameter (mm)</span>
-                <input type="number" id="ps-iris-preform" value="${processSetupNumber(processMap, "Preform Diameter", "")}" step="0.1" />
+                <input type="number" id="ps-iris-preform" value="${processSetupNumber(processMap, "Preform Diameter", processSetupNumber(orderMap, "Preform Diameter (mm)", ""))}" step="0.1" />
               </label>
               <label class="field-block">
                 <span>Octagonal F2F (mm)</span>
@@ -8051,7 +9565,8 @@ async function renderProcessSetupPage(data) {
                 <input type="number" id="ps-iris-tiger" value="${processSetupNumber(processMap, "Tiger Cut", processSetupNumber(orderMap, "Tiger Cut (%)", ""))}" step="0.1" />
               </label>
             </div>
-            <label class="toggle-row"><input type="checkbox" id="ps-iris-pm" ${processSetupText(processMap, "PM Iris System", "") === "1" ? "checked" : ""} /><span>PM iris system</span></label>
+            <label class="toggle-row"><input type="checkbox" id="ps-iris-pm" ${currentPmIris ? "checked" : ""} /><span>PM iris system</span></label>
+            <div class="micro-panel">Auto-picks the nearest live iris in 0.5 mm steps to a target gap of about 200 mm².</div>
             <div id="ps-iris-summary" class="metric-row compact"></div>
           </section>
 
@@ -8138,12 +9653,15 @@ function drawFinalizeOrderMarkup(order) {
 
 async function renderDrawFinalizePage(data) {
   const latestDataset = data.latest_dataset || data.dataset_files?.[0] || "";
-  const datasetOptions = (data.dataset_files || [])
-    .map((name) => {
-      const label = name === latestDataset ? `${name} - most recent` : name;
-      return `<option value="${name}" ${name === data.selected_csv ? "selected" : ""}>${label}</option>`;
-    })
-    .join("");
+  const datasetFiles = data.dataset_files || [];
+  const datasetOptions = datasetFiles.length
+    ? datasetFiles
+        .map((name) => {
+          const label = name === latestDataset ? `${name} - newest in progress` : name;
+          return `<option value="${name}" ${name === data.selected_csv ? "selected" : ""}>${label}</option>`;
+        })
+        .join("")
+    : `<option value="">No in-progress draw datasets</option>`;
   return `
     <section class="page-panel draw-finalize-page" id="draw-finalize-page">
       <div class="section-heading" ${titleBandStyle("title-photo-a.jpg", "34% center")}>
@@ -8151,11 +9669,12 @@ async function renderDrawFinalizePage(data) {
         <h2>Mark done or failed</h2>
         <p>This rebuild keeps the page close to the real purpose: pick the dataset CSV, match the draw, then close it as done or failed with the right notes and optional fault logging.</p>
       </div>
+      ${drawFinalizeNoticeMarkup()}
       <div class="draw-finalize-guide">
         <div class="draw-finalize-step is-active">
           <span>1</span>
-          <strong>Choose dataset</strong>
-          <p>Pick the target CSV and confirm the matched order context.</p>
+          <strong>Choose active dataset</strong>
+          <p>Pick the in-progress draw CSV you want to close.</p>
         </div>
         <div class="draw-finalize-step">
           <span>2</span>
@@ -8175,13 +9694,11 @@ async function renderDrawFinalizePage(data) {
             <strong>Finalize context</strong>
           </div>
           <label class="field-block">
-            <span>Dataset CSV</span>
-            <select id="finalize-dataset-select">
+            <span>In-progress dataset CSV</span>
+            <select id="finalize-dataset-select" ${datasetFiles.length ? "" : "disabled"}>
               ${datasetOptions}
             </select>
           </label>
-          ${latestDataset ? `<div class="micro-panel">Most recent dataset: <strong>${latestDataset}</strong></div>` : ""}
-          <div id="finalize-order-root">${drawFinalizeOrderMarkup(data.matched_order)}</div>
         </section>
         <section class="draw-finalize-actions draw-finalize-actions-primary">
           <div class="chart-card draw-finalize-done-card">
@@ -8198,7 +9715,7 @@ async function renderDrawFinalizePage(data) {
                 <span>Preform length after draw (cm)</span>
                 <input type="number" name="preformLengthCm" min="0" step="0.1" />
               </label>
-              <button class="action-btn action-primary" type="submit">Mark Done</button>
+              <button class="action-btn action-primary" type="submit" ${data.selected_csv ? "" : "disabled"}>Mark Done</button>
             </form>
           </div>
         </section>
@@ -8243,7 +9760,7 @@ async function renderDrawFinalizePage(data) {
                   <span>Fault description</span>
                   <textarea name="faultDescription" rows="3"></textarea>
                 </label>
-                <button class="action-btn action-primary" type="submit">Mark Failed</button>
+                <button class="action-btn action-primary" type="submit" ${data.selected_csv ? "" : "disabled"}>Mark Failed</button>
               </form>
               ${collapsibleSection("Failure recovery", `
                 <div class="micro-panel">After a failed draw, move the order forward cleanly instead of manually repairing it in another page.</div>
@@ -8413,7 +9930,15 @@ async function renderDevelopmentPage(data) {
                   <label class="field-block"><span>Draw CSV</span><select name="drawCsv">${drawCsvOptions}</select></label>
                 </div>
                 <label class="field-block"><span>Markdown notes</span><textarea name="markdownNotes" rows="4" placeholder="Use short markdown notes here for conclusions, formulas, or next steps."></textarea></label>
-                <label class="field-block"><span>Files</span><input type="file" name="attachmentsUpload" id="development-experiment-files" multiple /></label>
+                <label class="field-block development-file-drop-field">
+                  <span>Files</span>
+                  <input type="file" name="attachmentsUpload" id="development-experiment-files" class="development-file-input" multiple />
+                  <div class="development-file-dropzone" id="development-experiment-dropzone" tabindex="0" role="button" aria-controls="development-experiment-files">
+                    <strong>Drop files here</strong>
+                    <span>or click to choose files from your computer</span>
+                    <em id="development-experiment-file-summary">No files chosen yet.</em>
+                  </div>
+                </label>
                 <button class="action-btn action-primary" type="submit">Save Experiment</button>
               </form>
             </div>`, { kind: "workspace", meta: "new record", tone: "good", open: false, className: "development-utility-fold" })}
@@ -8504,6 +10029,7 @@ function bindHomePanels(homeData) {
   const focusShell = document.getElementById("home-focus-shell");
   const focusCoreBody = document.getElementById("home-focus-core-body");
   const toastRoot = document.getElementById("home-health-toast-root");
+  const railList = document.querySelector(".home-command-rail-list-side");
   if (!cards.length) return;
   let activePanelKey = DEFAULT_HOME_PANEL;
   let scheduleDockView = "week";
@@ -8538,39 +10064,34 @@ function bindHomePanels(homeData) {
     }
     syncDetailDock(panelKey);
     if (focusCoreBody) {
-      focusCoreBody.innerHTML = homeHeroCoreMarkup(panelKey, homeData);
+      focusCoreBody.innerHTML = homeHeroCoreMarkup(panelKey, homeData, false);
     }
+  };
+
+  const setHoverPreview = (panelKey) => {
+    if (!focusCoreBody) return;
+    focusCoreBody.innerHTML = homeHeroCoreMarkup(panelKey, homeData, false);
   };
 
   cards.forEach((card) => {
     const panelKey = card.dataset.homePanel;
     card.addEventListener("mouseenter", () => {
-      if (panelKey !== activePanelKey) {
-        syncDetailDock(panelKey);
-      }
-      if (focusCoreBody) {
-        focusCoreBody.innerHTML = homeHeroCoreMarkup(panelKey, homeData);
-      }
-    });
-    card.addEventListener("mouseleave", () => {
-      syncDetailDock(activePanelKey);
-      if (focusCoreBody) {
-        focusCoreBody.innerHTML = homeHeroCoreMarkup(activePanelKey, homeData);
-      }
+      syncDetailDock(panelKey);
+      setHoverPreview(panelKey);
     });
     card.addEventListener("focus", () => {
       syncDetailDock(panelKey);
-      if (focusCoreBody) {
-        focusCoreBody.innerHTML = homeHeroCoreMarkup(panelKey, homeData);
-      }
+      setHoverPreview(panelKey);
     });
     card.addEventListener("blur", () => {
       syncDetailDock(activePanelKey);
-      if (focusCoreBody) {
-        focusCoreBody.innerHTML = homeHeroCoreMarkup(activePanelKey, homeData);
-      }
+      setHoverPreview(activePanelKey);
     });
     card.addEventListener("click", () => setActive(panelKey));
+  });
+  railList?.addEventListener("mouseleave", () => {
+    syncDetailDock(activePanelKey);
+    setHoverPreview(activePanelKey);
   });
   setActive(DEFAULT_HOME_PANEL);
   if (toastRoot && diagnostics?.overall_ok && !window.__towerHealthToastShown) {
@@ -8644,7 +10165,7 @@ function collectOrderBuilderDraft(form) {
     opener: String(formData.get("opener") || "").trim(),
     requiredLength: formData.get("requiredLength"),
     goodZones: formData.get("goodZones"),
-    desiredDate: String(formData.get("desiredDate") || "").trim(),
+    preformDiameterMm: formData.get("preformDiameterMm"),
     tigerCut: formData.get("tigerCut"),
     octF2f: formData.get("octF2f"),
     notes: String(formData.get("notes") || "").trim(),
@@ -8656,6 +10177,7 @@ function collectOrderBuilderDraft(form) {
     secondaryTol: formData.get("secondaryTol"),
     tension: formData.get("tension"),
     drawSpeed: formData.get("drawSpeed"),
+    furnaceTemp: formData.get("furnaceTemp"),
     mainCoating: String(formData.get("mainCoating") || "").trim(),
     secondaryCoating: String(formData.get("secondaryCoating") || "").trim(),
     mainCoatingTemp: formData.get("mainCoatingTemp"),
@@ -8666,6 +10188,7 @@ function collectOrderBuilderDraft(form) {
 function applyTemplateToBuilder(form, template = {}) {
   const fieldMap = {
     geometry: "Fiber Geometry Type",
+    preformDiameterMm: "Preform Diameter (mm)",
     tigerCut: "Tiger Cut (%)",
     octF2f: "Octagonal F2F (mm)",
     fiberDiameter: "Fiber Diameter (µm)",
@@ -8676,6 +10199,7 @@ function applyTemplateToBuilder(form, template = {}) {
     secondaryTol: "Secondary Coating Diameter Tol (± µm)",
     tension: "Tension (g)",
     drawSpeed: "Draw Speed (m/min)",
+    furnaceTemp: "Furnace Temperature (°C)",
     mainCoating: "Main Coating",
     secondaryCoating: "Secondary Coating",
     mainCoatingTemp: "Main Coating Temperature (°C)",
@@ -8714,8 +10238,8 @@ function bindOrderDrawPage(orderData) {
   const templateProgressNote = document.getElementById("order-template-progress-note");
 
   const builderStepFields = {
-    required: ["project", "preformNumber", "priority", "geometry", "opener", "requiredLength"],
-    targets: ["fiberDiameter", "mainCoatingDiameter", "secondaryCoatingDiameter", "fiberTol", "mainTol", "secondaryTol", "tension", "drawSpeed"],
+    required: ["project", "preformNumber", "priority", "geometry", "opener", "requiredLength", "preformDiameterMm"],
+    targets: ["fiberDiameter", "mainCoatingDiameter", "secondaryCoatingDiameter", "fiberTol", "mainTol", "secondaryTol", "tension", "drawSpeed", "furnaceTemp"],
     materials: ["mainCoating", "secondaryCoating", "mainCoatingTemp", "secondaryCoatingTemp"],
   };
 
@@ -8833,9 +10357,23 @@ function bindOrderDrawPage(orderData) {
     if (sapBanner) {
       const showSap = geometry === "PANDA - PM";
       sapBanner.classList.toggle("is-hidden", !showSap);
-      sapBanner.textContent = showSap
-        ? `${orderData.sap_summary.item}: ${orderData.sap_summary.count} ${orderData.sap_summary.units} available`
-        : "";
+      sapBanner.classList.toggle("sap-stock-banner", showSap);
+      sapBanner.classList.toggle("is-low", Boolean(showSap && orderData.sap_summary.low));
+      if (showSap) {
+        const sapCount = Number(orderData.sap_summary.count || 0);
+        const sapCountLabel = Number.isFinite(sapCount) ? (Number.isInteger(sapCount) ? String(sapCount) : sapCount.toFixed(1)) : "0";
+        sapBanner.innerHTML = orderData.sap_summary.low
+          ? `
+            <strong>SAP rods empty</strong>
+            <span>${sapCountLabel} ${escapeHtml(orderData.sap_summary.units || "sets")} left in stock. PM draw cannot start until this is refilled.</span>
+          `
+          : `
+            <strong>${escapeHtml(orderData.sap_summary.item || "SAP Rods Set")}</strong>
+            <span>${sapCountLabel} ${escapeHtml(orderData.sap_summary.units || "sets")} available for PM orders.</span>
+          `;
+      } else {
+        sapBanner.innerHTML = "";
+      }
     }
   };
 
@@ -8880,7 +10418,6 @@ function bindOrderDrawPage(orderData) {
   });
 
   if (builderForm) {
-    builderForm.elements.namedItem("desiredDate").value = todayIsoDate();
     builderForm.elements.namedItem("scheduleDate").value = todayIsoDate();
     builderForm.addEventListener("input", updateBuilderProgress);
     builderForm.addEventListener("change", updateBuilderProgress);
@@ -8981,6 +10518,7 @@ function bindPartsPage(partsData) {
   let stageFlash = parsePartsStageFlashState(page.dataset.partsStageFlash || "");
   const stageStatusOrder = partsData.status_order || [];
   const stageSelectionMap = {};
+  const manualLookupRows = Array.isArray(partsData.manual_index_rows) ? partsData.manual_index_rows : [];
 
   const stepGoalMap = {
     "Wait for Approval": "Ask for approval and record who needs to approve this order.",
@@ -9005,12 +10543,185 @@ function bindPartsPage(partsData) {
   ]);
 
   const getStageByKey = (key) => getStageDefs().find((stage) => stage.key === key) || getStageDefs()[0];
-  const stageStepCopy = {
-    "Wait for Approval": "Send it into approval and record who should approve it.",
-    Approved: "Show approval fields only. Purchasing and receive fields stay hidden.",
-    Ordered: "Show approval plus supplier and order fields.",
-    Received: "Show the fields through receiving, but not inventory closeout yet.",
-    Archived: "Show the full path, including the final inventory / mounted result.",
+  const createStageCopy = {
+    Opened: {
+      title: "Start at Opened",
+      body: "Save a basic request first, then move it through approval and purchasing when that data exists.",
+    },
+    "Wait for Approval": {
+      title: "Start at Wait for approval",
+      body: "Open the request already aimed at approval and record who needs to respond.",
+    },
+    Approved: {
+      title: "Start at Approved",
+      body: "Use this when approval already happened and the order is ready for purchasing.",
+    },
+    Ordered: {
+      title: "Start at Ordered",
+      body: "Use this only when supplier, buyer, and order date are already known.",
+    },
+    Received: {
+      title: "Start at Received",
+      body: "Use this only when the part has physically arrived and is waiting for inventory handling.",
+    },
+  };
+
+  const detectManualComponentMatch = (orderItem) => {
+    if (!orderItem) return "";
+    const existingComponent = String(orderItem.maintenance_component || "").trim();
+    if (existingComponent) return existingComponent;
+    const partName = normalizeLookupText(orderItem.part_name);
+    const serial = normalizeLookupText(orderItem.serial_number);
+    if (!partName && !serial) return "";
+    const matchedRow = manualLookupRows.find((row) => {
+      const part = normalizeLookupText(row.part);
+      const partNumber = normalizeLookupText(row.part_number);
+      return (partName && (part === partName || scoreLookupMatch(row.part, partName) > 80))
+        || (serial && partNumber && partNumber === serial);
+    });
+    if (!matchedRow) return "";
+    return String(matchedRow.manual || "")
+      .replace(/\.pdf$/i, "")
+      .replace(/[_-]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  };
+
+  const buildCloseoutInventoryMatch = (inventoryRow, orderItem) => {
+    if (!inventoryRow || !orderItem) return null;
+    const partName = normalizeLookupText(orderItem.part_name);
+    const serial = normalizeLookupText(orderItem.serial_number);
+    const manualComponent = detectManualComponentMatch(orderItem);
+    const rawComponent = String(orderItem.maintenance_component || manualComponent || "").trim();
+    const component = normalizeLookupText(rawComponent);
+    const inventoryPart = normalizeLookupText(inventoryRow.part_name);
+    const inventorySerial = normalizeLookupText(inventoryRow.serial_number);
+    const inventoryComponent = normalizeLookupText(inventoryRow.component);
+    let score = 0;
+    const reasons = [];
+    let hasIdentityMatch = false;
+    if (partName && inventoryPart === partName) {
+      score += 120;
+      reasons.push("Same part name");
+      hasIdentityMatch = true;
+    }
+    if (serial && inventorySerial === serial) {
+      score += 140;
+      reasons.push("Same serial");
+      hasIdentityMatch = true;
+    }
+    if (!hasIdentityMatch) return null;
+    if (component && inventoryComponent === component) {
+      score += 24;
+      reasons.push(manualComponent && !orderItem.maintenance_component ? `Manual component: ${rawComponent}` : `Same component: ${rawComponent}`);
+    }
+    if (score <= 0) return null;
+    return {
+      row: inventoryRow,
+      score,
+      reasons,
+      matchedComponent: rawComponent,
+    };
+  };
+
+  const findCloseoutInventoryMatches = (orderItem, inventoryAction) => {
+    if (!orderItem || inventoryAction !== "Locate in inventory") return [];
+    return inventoryRows
+      .map((row) => buildCloseoutInventoryMatch(row, orderItem))
+      .filter(Boolean)
+      .sort((a, b) => b.score - a.score || String(a.row.part_name || "").localeCompare(String(b.row.part_name || "")))
+      .slice(0, 6);
+  };
+
+  const applyCloseoutInventoryMatch = (drawer, matchRow) => {
+    if (!drawer || !matchRow) return;
+    const matchIndexField = drawer.querySelector('input[name="inventoryMatchIndex"]');
+    const locationField = drawer.querySelector('input[name="inventoryLocation"]');
+    const itemTypeField = drawer.querySelector('select[name="inventoryItemType"]');
+    const componentField = drawer.querySelector('input[name="inventoryComponent"]');
+    const notesField = drawer.querySelector('input[name="inventoryNotes"]');
+    if (matchIndexField) matchIndexField.value = matchRow._inventoryIndex || "";
+    if (locationField) locationField.value = matchRow.location || "";
+    if (itemTypeField) itemTypeField.value = matchRow.item_type || "Part";
+    if (componentField) componentField.value = matchRow.component || detectManualComponentMatch(getCloseoutDrawerOrder()) || "Tower Parts";
+    if (notesField && !String(notesField.value || "").trim()) {
+      notesField.value = matchRow.notes || `Add to existing inventory row at ${matchRow.location || "selected place"}`;
+    }
+  };
+
+  const clearCloseoutInventoryMatch = (drawer) => {
+    const matchIndexField = drawer?.querySelector('input[name="inventoryMatchIndex"]');
+    if (matchIndexField) matchIndexField.value = "";
+  };
+
+  const getCloseoutDrawerOrder = () => {
+    const activeOrderId = stageActionState?.orderIds?.[0];
+    return orders.find((item) => String(item.index) === String(activeOrderId)) || null;
+  };
+
+  const renderCloseoutInventoryMatches = () => {
+    const drawer = page.querySelector(".maintenance-prep-actiondrawer");
+    if (!drawer) return;
+    const matchShell = drawer.querySelector("[data-parts-drawer-match-shell]");
+    const matchRoot = drawer.querySelector("[data-parts-drawer-match-suggestions]");
+    const matchSummary = drawer.querySelector("[data-parts-drawer-match-summary]");
+    const matchIndexField = drawer.querySelector('input[name="inventoryMatchIndex"]');
+    const inventoryActionField = drawer.querySelector('select[name="inventoryAction"]');
+    const targetSelect = drawer.querySelector('[data-parts-target-select]');
+    const componentField = drawer.querySelector('input[name="inventoryComponent"]');
+    if (!matchShell || !matchRoot || !inventoryActionField || !targetSelect) return;
+    const targetStatus = String(targetSelect.value || "").trim();
+    const inventoryAction = String(inventoryActionField.value || "").trim();
+    const targetRank = partsStatusRank(targetStatus, stageStatusOrder);
+    const orderItem = getCloseoutDrawerOrder();
+    if (componentField && !String(componentField.value || "").trim()) {
+      componentField.value = detectManualComponentMatch(orderItem) || "Tower Parts";
+    }
+    if (
+      stageActionState?.mode === "bulk"
+      || targetRank < partsStatusRank("Archived", stageStatusOrder)
+      || inventoryAction !== "Locate in inventory"
+    ) {
+      matchShell.hidden = true;
+      matchRoot.innerHTML = "";
+      return;
+    }
+    const matches = findCloseoutInventoryMatches(orderItem, inventoryAction);
+    if (!matches.length) {
+      matchShell.hidden = false;
+      matchRoot.innerHTML = `<div class="chart-empty">No existing inventory row matched this part yet. The closeout will create or update a row from the fields below.</div>`;
+      if (matchSummary) matchSummary.textContent = "No exact serial or part-name inventory row matched yet.";
+      return;
+    }
+    const selectedIndex = String(matchIndexField?.value || "");
+    matchShell.hidden = false;
+    if (matchSummary) {
+      matchSummary.textContent = `${matches.length} exact inventory row${matches.length === 1 ? "" : "s"} matched by serial or part name. Pick one to add quantity there.`;
+    }
+    matchRoot.innerHTML = matches
+      .map(({ row, reasons }) => {
+        const isActive = String(row._inventoryIndex) === selectedIndex;
+        const matchWhy = reasons?.length ? `Matched by: ${reasons.join(" · ")}` : "";
+        return `
+          <button
+            class="parts-drawer-match-option ${isActive ? "is-active" : ""}"
+            type="button"
+            data-parts-drawer-match="${escapeHtml(row._inventoryIndex)}"
+          >
+            <span class="parts-drawer-match-copy">
+              <strong>${escapeHtml(row.part_name || "Unnamed part")}</strong>
+              <span>${escapeHtml([row.component || "Tower Parts", row.location || "No location", row.item_type || "Part"].filter(Boolean).join(" · "))}</span>
+              ${
+                matchWhy
+                  ? `<span class="parts-drawer-match-why">${escapeHtml(matchWhy)}</span><span class="parts-drawer-match-reasons">${reasons.map((reason) => `<i>${escapeHtml(reason)}</i>`).join("")}</span>`
+                  : ""
+              }
+            </span>
+            <em>Qty ${escapeHtml(formatInventoryFormQuantity(row.quantity))}</em>
+          </button>
+        `;
+      })
+      .join("");
   };
 
   const syncStageDrawerFields = () => {
@@ -9021,9 +10732,6 @@ function bindPartsPage(partsData) {
     const currentStatus = drawer.dataset.partsCurrentStatus || "Opened";
     const targetRank = partsStatusRank(targetStatus, stageStatusOrder);
     const currentRank = partsStatusRank(currentStatus, stageStatusOrder);
-    const stepNote = drawer.querySelector('[data-parts-drawer-stepnote]');
-    const stepText = drawer.querySelector('[data-parts-drawer-steptext]');
-    if (stepText) stepText.textContent = stageStepCopy[targetStatus] || "Choose the furthest step you want. Only the fields needed for that move stay open.";
     const waitSection = drawer.querySelectorAll('[data-parts-drawer-section="wait-for-approval"]');
     const waitGroups = drawer.querySelectorAll('[data-parts-drawer-section-group="wait-for-approval"]');
     const approvedSection = drawer.querySelectorAll('[data-parts-drawer-section="approved"]');
@@ -9050,6 +10758,7 @@ function bindPartsPage(partsData) {
     toggle(closeoutLocationWrap ? [closeoutLocationWrap] : [], targetRank >= partsStatusRank("Archived", stageStatusOrder));
     if (closeoutLocationLabel) closeoutLocationLabel.textContent = inventoryAction === "Mount on machine" ? "Mounted place" : "Storage place";
     toggle(closeoutExtra, targetRank >= partsStatusRank("Archived", stageStatusOrder));
+    renderCloseoutInventoryMatches();
   };
 
   const persistStageUiState = () => {
@@ -9144,6 +10853,7 @@ function bindPartsPage(partsData) {
       inventoryItemType: targetStatus === "Archived" ? drawerPayload.inventoryItemType || "Part" : "",
       inventoryComponent: targetStatus === "Archived" ? drawerPayload.inventoryComponent || item.maintenance_component || "Tower Parts" : "",
       inventoryNotes: targetStatus === "Archived" ? drawerPayload.inventoryNotes || "" : "",
+      inventoryMatchIndex: targetStatus === "Archived" ? drawerPayload.inventoryMatchIndex || "" : "",
     };
   };
 
@@ -9205,6 +10915,28 @@ function bindPartsPage(partsData) {
     });
     Array.from(page.querySelectorAll('.maintenance-prep-actiondrawer select[name="inventoryAction"]') || []).forEach((select) => {
       select.addEventListener("change", syncStageDrawerFields);
+    });
+    Array.from(page.querySelectorAll('.maintenance-prep-actiondrawer input[name="inventoryLocation"], .maintenance-prep-actiondrawer input[name="inventoryComponent"], .maintenance-prep-actiondrawer select[name="inventoryItemType"]') || []).forEach((field) => {
+      const refreshMatches = () => {
+        const drawer = field.closest(".maintenance-prep-actiondrawer");
+        if (!drawer) return;
+        clearCloseoutInventoryMatch(drawer);
+        renderCloseoutInventoryMatches();
+      };
+      field.addEventListener("input", refreshMatches);
+      field.addEventListener("change", refreshMatches);
+    });
+    Array.from(page.querySelectorAll("[data-parts-drawer-match-suggestions]") || []).forEach((root) => {
+      root.addEventListener("click", (event) => {
+        const button = event.target instanceof Element ? event.target.closest("[data-parts-drawer-match]") : null;
+        if (!button) return;
+        const drawer = button.closest(".maintenance-prep-actiondrawer");
+        if (!drawer) return;
+        const matchRow = inventoryRows.find((row) => String(row._inventoryIndex) === String(button.dataset.partsDrawerMatch || ""));
+        if (!matchRow) return;
+        applyCloseoutInventoryMatch(drawer, matchRow);
+        renderCloseoutInventoryMatches();
+      });
     });
     Array.from(page.querySelectorAll("[data-parts-stage-confirm]") || []).forEach((button) => {
       button.addEventListener("click", async () => {
@@ -9335,10 +11067,58 @@ function bindPartsPage(partsData) {
     }
   });
 
+  const createStatusField = createForm?.querySelector("[data-parts-create-status]");
+  const createStageNote = createForm?.querySelector("[data-parts-create-stage-note]");
+  const syncCreateStepFields = () => {
+    if (!createForm || !createStatusField) return;
+    const targetStatus = String(createStatusField.value || "Opened").trim() || "Opened";
+    const targetRank = statusRank(targetStatus);
+    const toggle = (selector, visible) => {
+      Array.from(createForm.querySelectorAll(selector) || []).forEach((node) => {
+        node.classList.toggle("is-hidden", !visible);
+      });
+    };
+    toggle('[data-parts-create-stage="wait"]', targetRank >= statusRank("Wait for Approval"));
+    toggle('[data-parts-create-stage="approved"]', targetRank >= statusRank("Approved"));
+    toggle('[data-parts-create-stage="ordered"]', targetRank >= statusRank("Ordered"));
+    toggle('[data-parts-create-stage="received"]', targetRank >= statusRank("Received"));
+    const copy = createStageCopy[targetStatus] || createStageCopy.Opened;
+    if (createStageNote) {
+      const titleNode = createStageNote.querySelector("strong");
+      const bodyNode = createStageNote.querySelector("span");
+      if (titleNode) titleNode.textContent = copy.title;
+      if (bodyNode) bodyNode.textContent = copy.body;
+    }
+  };
+
+  const validateCreatePayload = (payload) => {
+    const targetStatus = String(payload.status || "Opened").trim() || "Opened";
+    const targetRank = statusRank(targetStatus);
+    if (!payload.partName) {
+      throw new Error("Part name is required.");
+    }
+    if (targetRank >= statusRank("Wait for Approval") && !String(payload.approvalRequestedFrom || "").trim()) {
+      throw new Error("Fill who the request should be sent to for approval.");
+    }
+    if (targetRank >= statusRank("Approved") && (!String(payload.approvedBy || "").trim() || !String(payload.approvalDate || "").trim())) {
+      throw new Error("Fill the approval owner and approval date.");
+    }
+    if (targetRank >= statusRank("Ordered") && (!String(payload.company || "").trim() || !String(payload.orderedBy || "").trim() || !String(payload.dateOrdered || "").trim())) {
+      throw new Error("Fill supplier, ordered by, and ordered date.");
+    }
+    if (targetRank >= statusRank("Received") && !String(payload.receivedDate || "").trim()) {
+      throw new Error("Fill the received date.");
+    }
+  };
+
+  createStatusField?.addEventListener("change", syncCreateStepFields);
+  syncCreateStepFields();
+
   createForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
     try {
       const payload = Object.fromEntries(new FormData(createForm).entries());
+      validateCreatePayload(payload);
       const result = await postJson("/api/parts/create", payload);
       bootstrapData = result.bootstrap || null;
       await renderRoute();
@@ -10791,13 +12571,14 @@ function getSqlAnalysisGeometry(canvas, axisCount = 1) {
   canvas.height = Math.round(cssHeight * dpr);
   const ctx = canvas.getContext("2d");
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  const leftAxisCount = Math.max(1, Math.ceil(axisCount / 2));
-  const rightAxisCount = Math.max(0, axisCount - leftAxisCount);
+  const safeAxisCount = Math.max(0, Number(axisCount) || 0);
+  const leftAxisCount = safeAxisCount > 0 ? Math.ceil(safeAxisCount / 2) : 0;
+  const rightAxisCount = Math.max(0, safeAxisCount - leftAxisCount);
   const padding = {
-    top: 26,
-    right: 18 + rightAxisCount * 74,
-    bottom: 38,
-    left: 42 + leftAxisCount * 74,
+    top: 22,
+    right: 16 + rightAxisCount * 72,
+    bottom: 34,
+    left: 20 + leftAxisCount * 72,
   };
   return {
     ctx,
@@ -10811,10 +12592,12 @@ function getSqlAnalysisGeometry(canvas, axisCount = 1) {
   };
 }
 
-function drawSqlAnalysisCanvas(seriesList, canvas, overlays = {}, selectedTarget = null) {
+function drawSqlAnalysisCanvas(analysisData, canvas, overlays = {}, selectedTarget = null) {
   if (!canvas) return;
-  const geometry = getSqlAnalysisGeometry(canvas, seriesList?.length || 1);
-  const { ctx, cssWidth, cssHeight, padding, plotWidth, plotHeight, leftAxisCount, rightAxisCount } = geometry;
+  const numericSeries = Array.isArray(analysisData) ? analysisData : (analysisData?.numericSeries || []);
+  const textSeries = Array.isArray(analysisData) ? [] : (analysisData?.textSeries || []);
+  const geometry = getSqlAnalysisGeometry(canvas, numericSeries.length);
+  const { ctx, cssWidth, cssHeight, padding, plotWidth, plotHeight } = geometry;
   ctx.clearRect(0, 0, cssWidth, cssHeight);
 
   const bg = ctx.createLinearGradient(0, 0, 0, cssHeight);
@@ -10823,47 +12606,123 @@ function drawSqlAnalysisCanvas(seriesList, canvas, overlays = {}, selectedTarget
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, cssWidth, cssHeight);
 
-  const mainHeight = plotHeight * 0.76;
-  const eventTop = padding.top + mainHeight + 22;
-  const eventHeight = plotHeight - mainHeight - 22;
-
-  ctx.strokeStyle = "rgba(147, 220, 229, 0.10)";
-  ctx.lineWidth = 1;
-  for (let i = 0; i <= 4; i += 1) {
-    const y = padding.top + (mainHeight / 4) * i;
-    ctx.beginPath();
-    ctx.moveTo(padding.left, y);
-    ctx.lineTo(padding.left + plotWidth, y);
-    ctx.stroke();
-  }
-
-  ctx.strokeStyle = "rgba(147, 220, 229, 0.18)";
-  ctx.beginPath();
-  ctx.moveTo(padding.left, padding.top);
-  ctx.lineTo(padding.left, padding.top + mainHeight);
-  ctx.lineTo(padding.left + plotWidth, padding.top + mainHeight);
-  ctx.moveTo(padding.left, eventTop);
-  ctx.lineTo(padding.left, eventTop + eventHeight);
-  ctx.lineTo(padding.left + plotWidth, eventTop + eventHeight);
-  ctx.stroke();
-
-  if (!seriesList?.length) {
+  if (!numericSeries.length && !textSeries.length) {
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillStyle = "rgba(214, 228, 231, 0.6)";
-    ctx.fillText("Run a filter with numeric matched values to see the analysis plot.", cssWidth / 2, cssHeight / 2);
+    ctx.fillText("Run a filter with matched values to see the analysis plot.", cssWidth / 2, cssHeight / 2);
     return [];
   }
 
   const colors = ["#72ffe8", "#2bd8ff", "#ffd56f", "#ff9ca6", "#cbbff7", "#95efb1"];
-  const stats = seriesList.map((series) => {
+  const overlayEventCount = (overlays.maintenance || []).length + (overlays.faults || []).length;
+  const sectionGap = overlayEventCount ? 14 : 8;
+  const eventHeight = overlayEventCount ? Math.max(48, plotHeight * 0.11) : 24;
+  const hasNumeric = numericSeries.length > 0;
+  const hasText = textSeries.length > 0;
+  const isMixedPlot = hasNumeric && hasText;
+  const textSectionGap = isMixedPlot ? 6 : 12;
+  const textSectionHeadHeight = isMixedPlot && textSeries.length === 1 ? 0 : (isMixedPlot ? 14 : 22);
+  const textSectionPadBottom = isMixedPlot ? 4 : 8;
+  const textSeriesMeta = hasText
+    ? textSeries.map((series) => ({
+        categories: dedupeStrings(series.categories?.length ? series.categories : series.points.map((point) => point.displayValue || point.value)).slice(0, 50),
+      }))
+    : [];
+  let textLaneHeight = hasText ? (isMixedPlot ? 24 : 28) : 0;
+  const computeTextHeight = (laneHeight) => textSeriesMeta.reduce(
+    (sum, meta, index) => sum + textSectionHeadHeight + textSectionPadBottom + Math.max(1, meta.categories.length) * laneHeight + (index ? textSectionGap : 0),
+    0,
+  );
+  const totalTextRows = textSeriesMeta.reduce((sum, meta) => sum + Math.max(1, meta.categories.length), 0);
+  let textHeight = hasText ? computeTextHeight(textLaneHeight) : 0;
+  let numericHeight = hasNumeric
+    ? plotHeight - eventHeight - textHeight - (hasText ? 10 : 0) - sectionGap
+    : 0;
+  if (hasNumeric && hasText && numericHeight < 120) {
+    const minimumTextHeight = computeTextHeight(isMixedPlot ? 18 : 20);
+    const reducible = Math.max(0, textHeight - minimumTextHeight);
+    const needed = 120 - numericHeight;
+    const reduceBy = Math.min(reducible, needed);
+    if (reduceBy > 0) {
+      textLaneHeight = Math.max(isMixedPlot ? 18 : 20, textLaneHeight - reduceBy / Math.max(1, textSeries.length));
+      textHeight = computeTextHeight(textLaneHeight);
+      numericHeight = plotHeight - eventHeight - textHeight - 10 - sectionGap;
+    }
+  }
+  if (hasText && !hasNumeric) {
+    const availableTextHeight = Math.max(0, plotHeight - eventHeight - sectionGap);
+    const extraHeight = Math.max(0, availableTextHeight - textHeight);
+    if (extraHeight > 0 && totalTextRows > 0) {
+      textLaneHeight += Math.min(14, extraHeight / totalTextRows);
+      textHeight = computeTextHeight(textLaneHeight);
+    }
+  }
+  numericHeight = Math.max(0, numericHeight);
+  const numericTop = padding.top;
+  const textTop = numericTop + numericHeight + (hasNumeric && hasText ? 10 : 0);
+  const eventTop = padding.top + numericHeight + textHeight + ((hasNumeric || hasText) ? sectionGap : 0);
+  const textSections = [];
+  if (hasText) {
+    let cursor = textTop;
+    textSeriesMeta.forEach((meta) => {
+      const rowCount = Math.max(1, meta.categories.length);
+      const height = textSectionHeadHeight + textSectionPadBottom + rowCount * textLaneHeight;
+      textSections.push({
+        categories: meta.categories,
+        top: cursor,
+        bodyTop: cursor + textSectionHeadHeight,
+        height,
+        rowCount,
+      });
+      cursor += height + textSectionGap;
+    });
+  }
+  const timelineLeft = hasText
+    ? Math.min(padding.left + 174, padding.left + plotWidth * 0.22)
+    : padding.left;
+  const timelineRight = padding.left + plotWidth;
+  const categoryLabelRight = hasText ? Math.max(padding.left + 126, timelineLeft - 12) : timelineLeft;
+
+  if (numericHeight > 0) {
+    ctx.strokeStyle = "rgba(147, 220, 229, 0.10)";
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i += 1) {
+      const y = numericTop + (numericHeight / 4) * i;
+      ctx.beginPath();
+      ctx.moveTo(timelineLeft, y);
+      ctx.lineTo(timelineRight, y);
+      ctx.stroke();
+    }
+  }
+
+  ctx.strokeStyle = "rgba(147, 220, 229, 0.18)";
+  ctx.strokeRect(padding.left, padding.top, plotWidth, plotHeight);
+  ctx.beginPath();
+  ctx.moveTo(timelineLeft, padding.top);
+  ctx.lineTo(timelineLeft, eventTop + eventHeight);
+  if (hasNumeric && hasText) {
+    ctx.moveTo(padding.left, textTop - 4);
+    ctx.lineTo(timelineRight, textTop - 4);
+  }
+  if (overlayEventCount) {
+    ctx.moveTo(padding.left, eventTop - 4);
+    ctx.lineTo(timelineRight, eventTop - 4);
+  }
+  if (hasText) {
+    ctx.moveTo(categoryLabelRight, textTop);
+    ctx.lineTo(categoryLabelRight, textTop + textHeight);
+  }
+  ctx.stroke();
+
+  const stats = numericSeries.map((series) => {
     const values = series.points.map((p) => p.value);
     const min = Math.min(...values);
     const max = Math.max(...values);
     return { min, max, span: max - min || 1 };
   });
   const timelineKeys = [];
-  seriesList.forEach((series) => {
+  [...numericSeries, ...textSeries].forEach((series) => {
     series.points.forEach((point) => {
       const key = `${point.ts || ""}|${point.draw || ""}`;
       if (!timelineKeys.includes(key)) timelineKeys.push(key);
@@ -10878,13 +12737,63 @@ function drawSqlAnalysisCanvas(seriesList, canvas, overlays = {}, selectedTarget
     if (!timelineKeys.includes(key)) timelineKeys.push(key);
   });
   timelineKeys.sort((a, b) => a.localeCompare(b));
-  const xMap = new Map(timelineKeys.map((key, index) => [key, padding.left + (plotWidth * index) / Math.max(1, timelineKeys.length - 1)]));
+  const xMap = new Map(
+    timelineKeys.map((key, index) => [
+      key,
+      timelineLeft + ((timelineRight - timelineLeft) * index) / Math.max(1, timelineKeys.length - 1),
+    ]),
+  );
   const xForPoint = (point) => xMap.get(`${point.ts || ""}|${point.draw || ""}`) ?? padding.left;
-  const yForPoint = (value, stat) => padding.top + mainHeight - ((value - stat.min) / stat.span) * mainHeight;
+  const yForNumericPoint = (value, stat) => numericTop + numericHeight - ((value - stat.min) / stat.span) * numericHeight;
+  const timelineEntries = timelineKeys.map((key) => ({
+    key,
+    ts: key.split("|")[0] || "",
+    x: xMap.get(key) ?? timelineLeft,
+  }));
+  const formatTickLabel = (timestamp) => {
+    const raw = String(timestamp || "").trim();
+    if (!raw) return "";
+    const normalized = raw.replace("T", " ");
+    const [datePart] = normalized.split(" ");
+    if (!datePart) return raw;
+    if (datePart.includes("-")) {
+      const parts = datePart.split("-");
+      if (parts.length === 3) {
+        const [year, month, day] = parts;
+        return `${month}/${day}/${String(year || "").slice(-2)}`;
+      }
+    }
+    if (datePart.includes("/")) {
+      const parts = datePart.split("/");
+      if (parts.length === 3) {
+        const [first, second, year] = parts;
+        const firstNum = Number(first);
+        const yearShort = String(year || "").slice(-2);
+        if (first.length === 4) {
+          const [yearIso, monthIso, dayIso] = parts;
+          return `${monthIso}/${dayIso}/${String(yearIso || "").slice(-2)}`;
+        }
+        if (firstNum > 12 && Number.isFinite(firstNum)) {
+          return `${first}/${second}/${yearShort}`;
+        }
+        return `${first}/${second}/${yearShort}`;
+      }
+    }
+    return datePart;
+  };
+  const tickTargetCount = Math.min(6, Math.max(3, Math.round((timelineRight - timelineLeft) / 170)));
+  const tickCandidates = timelineEntries.length
+    ? Array.from(new Set(
+      Array.from({ length: tickTargetCount }, (_, index) => {
+        if (tickTargetCount <= 1) return 0;
+        return Math.round((index * (timelineEntries.length - 1)) / (tickTargetCount - 1));
+      }),
+    ))
+    : [];
 
   ctx.font = '12px "Space Grotesk", sans-serif';
   ctx.textBaseline = "middle";
-  seriesList.forEach((series, index) => {
+  numericSeries.forEach((series, index) => {
     const stat = stats[index];
     const color = colors[index % colors.length];
     const isLeft = index % 2 === 0;
@@ -10893,39 +12802,37 @@ function drawSqlAnalysisCanvas(seriesList, canvas, overlays = {}, selectedTarget
 
     ctx.strokeStyle = color;
     ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(axisX + (isLeft ? 6 : -6), padding.top);
-    ctx.lineTo(axisX + (isLeft ? 6 : -6), padding.top + mainHeight);
-    ctx.stroke();
+    if (numericHeight > 0) {
+      ctx.beginPath();
+      ctx.moveTo(axisX + (isLeft ? 6 : -6), numericTop);
+      ctx.lineTo(axisX + (isLeft ? 6 : -6), numericTop + numericHeight);
+      ctx.stroke();
+    }
 
     ctx.fillStyle = color;
     ctx.textAlign = isLeft ? "right" : "left";
     for (let i = 0; i <= 4; i += 1) {
-      const y = padding.top + mainHeight - (mainHeight / 4) * i;
+      const y = numericTop + numericHeight - (numericHeight / 4) * i;
       const tickValue = stat.min + (stat.span * i) / 4;
       const tickLabel = Math.abs(tickValue) >= 1000 ? tickValue.toFixed(0) : tickValue.toFixed(2);
       ctx.fillText(tickLabel, axisX, y);
     }
 
     ctx.save();
-    ctx.translate(axisX + (isLeft ? -48 : 48), padding.top + mainHeight / 2);
+    ctx.translate(axisX + (isLeft ? -48 : 48), numericTop + numericHeight / 2);
     ctx.rotate(isLeft ? -Math.PI / 2 : Math.PI / 2);
     ctx.textAlign = "center";
     ctx.fillText(series.label, 0, 0);
     ctx.restore();
   });
 
-  ctx.textAlign = "left";
-  ctx.fillStyle = "rgba(191, 219, 222, 0.62)";
-  ctx.fillText("Event lane", padding.left, eventTop - 14);
-
   const drawBands = new Map();
   const hitTargets = [];
-  seriesList.forEach((series, index) => {
+  numericSeries.forEach((series, index) => {
     const stat = stats[index];
     series.points.forEach((point) => {
       const x = xForPoint(point);
-      const y = yForPoint(point.value, stat);
+      const y = yForNumericPoint(point.value, stat);
       const key = `${point.ts || ""}|${point.draw || ""}`;
       if (!drawBands.has(key)) drawBands.set(key, []);
       drawBands.get(key).push({ x, y });
@@ -10960,7 +12867,7 @@ function drawSqlAnalysisCanvas(seriesList, canvas, overlays = {}, selectedTarget
       ctx.fillStyle = "rgba(143, 221, 227, 0.08)";
       ctx.strokeStyle = "rgba(143, 221, 227, 0.42)";
       ctx.setLineDash([6, 6]);
-      ctx.fillRect(x - 12, padding.top, 24, mainHeight);
+      ctx.fillRect(x - 12, padding.top, 24, plotHeight);
       ctx.beginPath();
       ctx.moveTo(x, padding.top);
       ctx.lineTo(x, eventTop + eventHeight);
@@ -10973,22 +12880,25 @@ function drawSqlAnalysisCanvas(seriesList, canvas, overlays = {}, selectedTarget
     }
   }
 
-  seriesList.forEach((series, index) => {
+  numericSeries.forEach((series, index) => {
     const stat = stats[index];
     const isFocusedSeries = !selectedTarget || selectedTarget.type !== "series" || selectedTarget.label === series.label;
     ctx.beginPath();
     ctx.lineWidth = 2.2;
     ctx.strokeStyle = isFocusedSeries ? colors[index % colors.length] : "rgba(133, 162, 166, 0.26)";
+    let previousX = null;
     series.points.forEach((point, pointIndex) => {
       const x = xForPoint(point);
-      const y = yForPoint(point.value, stat);
-      if (pointIndex === 0) ctx.moveTo(x, y);
+      const y = yForNumericPoint(point.value, stat);
+      const sharesColumnWithPrevious = pointIndex > 0 && previousX != null && Math.abs(x - previousX) < 0.5;
+      if (pointIndex === 0 || sharesColumnWithPrevious) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
+      previousX = x;
     });
     ctx.stroke();
     series.points.forEach((point) => {
       const x = xForPoint(point);
-      const y = yForPoint(point.value, stat);
+      const y = yForNumericPoint(point.value, stat);
       ctx.fillStyle = isFocusedSeries ? colors[index % colors.length] : "rgba(133, 162, 166, 0.3)";
       ctx.beginPath();
       const isSelected = selectedTarget?.type === "series" && selectedTarget.draw === point.draw && selectedTarget.label === series.label && selectedTarget.ts === point.ts;
@@ -11000,6 +12910,7 @@ function drawSqlAnalysisCanvas(seriesList, canvas, overlays = {}, selectedTarget
         draw: point.draw,
         ts: point.ts,
         value: point.value,
+        displayValue: point.value,
         x,
         y,
         radius: 10,
@@ -11007,16 +12918,116 @@ function drawSqlAnalysisCanvas(seriesList, canvas, overlays = {}, selectedTarget
     });
   });
 
+  const truncateText = (value, max = 26) => {
+    const text = String(value || "").trim();
+    if (text.length <= max) return text;
+    return `${text.slice(0, Math.max(0, max - 1))}\u2026`;
+  };
+
+  if (textSeries.length) {
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    textSeries.forEach((series, index) => {
+      const section = textSections[index];
+      if (!section) return;
+      const color = colors[(numericSeries.length + index) % colors.length];
+      if (textSectionHeadHeight > 0) {
+        ctx.fillStyle = color;
+        ctx.font = '11px "Orbitron", sans-serif';
+        ctx.textBaseline = "top";
+        ctx.fillText(series.label, padding.left + 10, section.top + 4);
+        ctx.fillStyle = "rgba(178, 208, 211, 0.62)";
+        ctx.font = '10px "Space Grotesk", sans-serif';
+        ctx.textAlign = "right";
+        ctx.fillText(`${section.categories.length} categories · ${series.points.length} draws`, timelineRight - 10, section.top + 5);
+        ctx.textAlign = "left";
+      }
+      ctx.font = '11px "Space Grotesk", sans-serif';
+      ctx.textBaseline = "middle";
+      section.categories.forEach((category, categoryIndex) => {
+        const rowTop = section.bodyTop + categoryIndex * textLaneHeight;
+        const rowY = rowTop + textLaneHeight / 2;
+        if (categoryIndex % 2 === 0) {
+          ctx.fillStyle = "rgba(255, 255, 255, 0.015)";
+          ctx.fillRect(padding.left + 1, rowTop, plotWidth - 2, textLaneHeight);
+        }
+        ctx.strokeStyle = "rgba(147, 220, 229, 0.08)";
+        ctx.beginPath();
+        ctx.moveTo(timelineLeft, rowY);
+        ctx.lineTo(timelineRight, rowY);
+        ctx.stroke();
+        ctx.fillStyle = category === "Unspecified"
+          ? "rgba(255, 196, 130, 0.88)"
+          : (categoryIndex % 2 === 0 ? "rgba(188, 215, 220, 0.9)" : "rgba(167, 198, 202, 0.76)");
+        ctx.fillText(truncateText(category, 30), padding.left + 10, rowY);
+      });
+      series.points.forEach((point, pointIndex) => {
+        const x = xForPoint(point);
+        const categoryValue = point.displayValue || point.value;
+        const categoryIndex = Math.max(0, section.categories.indexOf(categoryValue));
+        const y = section.bodyTop + categoryIndex * textLaneHeight + textLaneHeight / 2;
+        const key = `${point.ts || ""}|${point.draw || ""}`;
+        if (!drawBands.has(key)) drawBands.set(key, []);
+        drawBands.get(key).push({ x, y });
+        const isSelected = selectedTarget?.type === "series"
+          && selectedTarget.draw === point.draw
+          && selectedTarget.label === series.label
+          && selectedTarget.ts === point.ts;
+        ctx.fillStyle = color;
+        ctx.shadowBlur = isSelected ? 8 : 4.5;
+        ctx.shadowColor = color;
+        ctx.beginPath();
+        ctx.arc(x, y, isSelected ? 4.2 : 2.6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        if (isSelected) {
+          ctx.strokeStyle = "rgba(235, 249, 251, 0.92)";
+          ctx.lineWidth = 1.1;
+          ctx.beginPath();
+          ctx.arc(x, y, 6, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        hitTargets.push({
+          type: "series",
+          label: series.label,
+          draw: point.draw,
+          ts: point.ts,
+          value: point.value,
+          displayValue: point.displayValue || point.value,
+          isText: true,
+          x,
+          y,
+          radius: 12,
+        });
+      });
+    });
+  }
+
   ctx.textAlign = "left";
   ctx.textBaseline = "top";
-  seriesList.slice(0, 4).forEach((series, index) => {
-    const x = padding.left + 8 + (index % 2) * 220;
-    const y = 6 + Math.floor(index / 2) * 16;
+  const legendVisibleSeries = numericSeries.slice(0, 12);
+  legendVisibleSeries.forEach((series, index) => {
+    const x = padding.left + 8 + (index % 3) * 188;
+    const y = 6 + Math.floor(index / 3) * 16;
     ctx.fillStyle = colors[index % colors.length];
     ctx.fillRect(x, y + 3, 10, 10);
     ctx.fillStyle = "rgba(230, 249, 255, 0.82)";
     ctx.fillText(series.label, x + 16, y);
   });
+  if (numericSeries.length > legendVisibleSeries.length) {
+    const x = padding.left + 8;
+    const y = 6 + Math.ceil(legendVisibleSeries.length / 3) * 16;
+    ctx.fillStyle = "rgba(191, 219, 222, 0.68)";
+    ctx.fillText(`+${numericSeries.length - legendVisibleSeries.length} more`, x, y);
+  }
+  if (textSeries.length && numericSeries.length) {
+    const x = padding.left + 8;
+    const y = 6 + Math.max(1, Math.ceil(legendVisibleSeries.length / 3)) * 16;
+    ctx.fillStyle = colors[(numericSeries.length) % colors.length];
+    ctx.fillRect(x, y + 3, 10, 10);
+    ctx.fillStyle = "rgba(191, 219, 222, 0.68)";
+    ctx.fillText(textSeries.length === 1 ? textSeries[0].label : `${textSeries.length} categorical lanes`, x + 16, y);
+  }
 
   const drawEventMarkers = (items, y, color, shape = "circle") => {
     items.forEach((item) => {
@@ -11052,13 +13063,42 @@ function drawSqlAnalysisCanvas(seriesList, canvas, overlays = {}, selectedTarget
 
   const maintY = eventTop + eventHeight * 0.34;
   const faultY = eventTop + eventHeight * 0.72;
-  ctx.fillStyle = "rgba(196, 227, 229, 0.68)";
-  ctx.textAlign = "right";
-  ctx.textBaseline = "middle";
-  ctx.fillText("Maint", padding.left - 8, maintY);
-  ctx.fillText("Fault", padding.left - 8, faultY);
-  drawEventMarkers(overlays.maintenance || [], maintY, "#ffd56f", "triangle");
-  drawEventMarkers(overlays.faults || [], faultY, "#ff9ca6", "circle");
+  if (overlayEventCount) {
+    ctx.textAlign = "left";
+    ctx.fillStyle = "rgba(191, 219, 222, 0.62)";
+    ctx.fillText("Event lane", padding.left, eventTop - 14);
+    ctx.fillStyle = "rgba(196, 227, 229, 0.68)";
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    ctx.fillText("Maint", timelineLeft - 8, maintY);
+    ctx.fillText("Fault", timelineLeft - 8, faultY);
+    drawEventMarkers(overlays.maintenance || [], maintY, "#ffd56f", "triangle");
+    drawEventMarkers(overlays.faults || [], faultY, "#ff9ca6", "circle");
+  }
+
+  if (timelineEntries.length) {
+    const axisY = eventTop + eventHeight - 16;
+    ctx.strokeStyle = "rgba(147, 220, 229, 0.18)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(timelineLeft, axisY);
+    ctx.lineTo(timelineRight, axisY);
+    ctx.stroke();
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    ctx.font = '10px "Space Grotesk", sans-serif';
+    tickCandidates.forEach((tickIndex) => {
+      const tick = timelineEntries[tickIndex];
+      if (!tick) return;
+      ctx.strokeStyle = "rgba(147, 220, 229, 0.22)";
+      ctx.beginPath();
+      ctx.moveTo(tick.x, axisY);
+      ctx.lineTo(tick.x, axisY + 6);
+      ctx.stroke();
+      ctx.fillStyle = "rgba(191, 219, 222, 0.68)";
+      ctx.fillText(formatTickLabel(tick.ts), tick.x, axisY + 8);
+    });
+  }
   return hitTargets;
 }
 
@@ -11100,7 +13140,77 @@ function sqlMathOperationLabel(operation) {
     percent_ab: "A vs B %",
     normalize: "Normalized A",
     zscore: "Z-score A",
+    custom_ab: "Custom f(A,B)",
   }[operation] || "Derived trace";
+}
+
+const SQL_MATH_FIXED_WINDOW = 5;
+const SQL_MATH_ALLOWED_FUNCTIONS = {
+  abs: Math.abs,
+  ceil: Math.ceil,
+  floor: Math.floor,
+  round: Math.round,
+  sqrt: Math.sqrt,
+  min: Math.min,
+  max: Math.max,
+  pow: Math.pow,
+  log: Math.log,
+  exp: Math.exp,
+};
+const SQL_MATH_FUNCTION_ALIASES = {
+  power: "pow",
+  absolute: "abs",
+  minimum: "min",
+  maximum: "max",
+};
+
+function sqlMathSeriesLabel(operation, expression = "") {
+  if (operation === "custom_ab") {
+    const raw = String(expression || "A").trim() || "A";
+    return `f(A,B) = ${raw}`;
+  }
+  return sqlMathOperationLabel(operation);
+}
+
+function sqlCompileMathExpression(expression) {
+  const raw = String(expression || "A").trim() || "A";
+  if (/[^0-9A-Za-z_+\-*/%^().,\s]/.test(raw)) {
+    return { error: "Formula has unsupported characters." };
+  }
+  let normalized = raw.replace(/\b(?:np|math)\s*\.\s*/gi, "");
+  Object.entries(SQL_MATH_FUNCTION_ALIASES).forEach(([alias, canonical]) => {
+    normalized = normalized.replace(new RegExp(`\\b${alias}\\s*\\(`, "gi"), `${canonical}(`);
+  });
+  const identifiers = Array.from(new Set(normalized.match(/[A-Za-z_][A-Za-z0-9_]*/g) || []));
+  const allowed = new Set(["A", "B", ...Object.keys(SQL_MATH_ALLOWED_FUNCTIONS)]);
+  const invalid = identifiers.find((item) => !allowed.has(item));
+  if (invalid) {
+    return { error: `Unsupported token "${invalid}".` };
+  }
+  const rewritten = normalized.replace(/\^/g, "**");
+  let compiled = null;
+  try {
+    compiled = new Function(
+      "A",
+      "B",
+      "Fns",
+      `"use strict"; const { ${Object.keys(SQL_MATH_ALLOWED_FUNCTIONS).join(", ")} } = Fns; return (${rewritten});`,
+    );
+  } catch (error) {
+    return { error: "Formula syntax is invalid." };
+  }
+  return {
+    expression: raw,
+    usesB: identifiers.includes("B"),
+    run(A, B) {
+      try {
+        const value = compiled(Number(A), Number(B), SQL_MATH_ALLOWED_FUNCTIONS);
+        return Number.isFinite(value) ? value : null;
+      } catch (error) {
+        return null;
+      }
+    },
+  };
 }
 
 function dedupeStrings(values) {
@@ -11115,25 +13225,60 @@ function dedupeStrings(values) {
   return output;
 }
 
+function sqlAnalysisPointKey(label, draw, ts) {
+  return `${String(label || "")}||${String(draw || "")}||${String(ts || "")}`;
+}
+
 function buildSqlMathSeries(seriesList, config = {}) {
   const sourceA = String(config.sourceA || "");
   const sourceB = String(config.sourceB || "");
   const operation = String(config.operation || "identity");
-  const windowSize = Math.max(2, Number(config.window || 3));
+  const expression = String(config.expression || "A").trim() || "A";
+  const hiddenPointKeys = Array.isArray(config.hiddenPointKeys) ? config.hiddenPointKeys : [];
+  const windowSize = SQL_MATH_FIXED_WINDOW;
   const seriesA = seriesList.find((item) => item.label === sourceA);
   const seriesB = seriesList.find((item) => item.label === sourceB);
-  if (!seriesA) return { label: sqlMathOperationLabel(operation), points: [], meta: [] };
+  const derivedLabel = sqlMathSeriesLabel(operation, expression);
+  if (!seriesA) return { label: derivedLabel, points: [], meta: [] };
+  const customFormula = operation === "custom_ab" ? sqlCompileMathExpression(expression) : null;
+  if (customFormula?.error) {
+    return {
+      label: derivedLabel,
+      points: [],
+      meta: [],
+      sourceA,
+      sourceB,
+      operation,
+      expression,
+      windowSize,
+      error: customFormula.error,
+    };
+  }
+  const requiresB = ["spread_ab", "ratio_ab", "percent_ab"].includes(operation) || (operation === "custom_ab" && customFormula?.usesB);
+  if (requiresB && !seriesB) {
+    return {
+      label: derivedLabel,
+      points: [],
+      meta: [],
+      sourceA,
+      sourceB,
+      operation,
+      expression,
+      windowSize,
+      error: "Choose Source B for this math mode.",
+    };
+  }
 
   const mapA = new Map(seriesA.points.map((point) => [`${point.ts || ""}|${point.draw || ""}`, point]));
   const mapB = new Map((seriesB?.points || []).map((point) => [`${point.ts || ""}|${point.draw || ""}`, point]));
   const keys = Array.from(
     new Set([
       ...mapA.keys(),
-      ...((operation === "spread_ab" || operation === "ratio_ab" || operation === "percent_ab") ? mapB.keys() : []),
+      ...(requiresB ? mapB.keys() : []),
     ]),
   )
     .filter((key) => {
-      if (operation === "spread_ab" || operation === "ratio_ab" || operation === "percent_ab") {
+      if (requiresB) {
         return mapA.has(key) && mapB.has(key);
       }
       return mapA.has(key);
@@ -11174,6 +13319,8 @@ function buildSqlMathSeries(seriesList, config = {}) {
       value = baseMax === baseMin ? 0 : ((Number(pointA?.value) - baseMin) / (baseMax - baseMin)) * 100;
     } else if (operation === "zscore") {
       value = (Number(pointA?.value) - baseMean) / baseStd;
+    } else if (operation === "custom_ab") {
+      value = customFormula?.run(pointA?.value, pointB?.value ?? 0);
     }
     if (!Number.isFinite(value)) return;
     const point = {
@@ -11181,6 +13328,8 @@ function buildSqlMathSeries(seriesList, config = {}) {
       ts: pointA?.ts || pointB?.ts || "",
       value,
     };
+    const pointKey = sqlAnalysisPointKey(derivedLabel, point.draw, point.ts);
+    if (hiddenPointKeys.includes(pointKey)) return;
     points.push(point);
     meta.push({
       ...point,
@@ -11190,18 +13339,24 @@ function buildSqlMathSeries(seriesList, config = {}) {
   });
 
   return {
-    label: sqlMathOperationLabel(operation),
+    label: derivedLabel,
     points,
     meta,
     sourceA,
     sourceB,
     operation,
+    expression,
     windowSize,
   };
 }
 
 function sqlMathRecipeKey(config = {}) {
-  return [config.sourceA || "", config.sourceB || "", config.operation || "identity", Math.max(2, Number(config.window || 3))].join("|");
+  return [
+    config.sourceA || "",
+    config.sourceB || "",
+    config.operation || "identity",
+    String(config.expression || "A").trim() || "A",
+  ].join("|");
 }
 
 function drawSqlMathCanvas(mathSeriesList, canvas, overlays = {}, selectedTarget = null) {
@@ -12055,6 +14210,7 @@ function bindMaintenancePage(maintenanceData) {
   let componentFilter = page.dataset.maintComponent || "";
   let packageFilter = page.dataset.maintPackage || "";
   let pickerOpen = page.dataset.maintPickerOpen === "1";
+  let createTaskOpen = page.dataset.maintCreateTaskOpen === "1";
   let runtimeFoldOpen = page.dataset.maintRuntimeOpen === "1";
   let selectedTaskId = page.dataset.maintTaskId || (maintenanceData.tasks[0] || maintenanceData.prep_queue[0] || {}).task_id || "";
   let prepCutoffProgress = page.dataset.maintPrepCutoff || "";
@@ -12071,17 +14227,71 @@ function bindMaintenancePage(maintenanceData) {
   let prepHorizonFoldOpen = localStorage.getItem(MAINT_PREP_HORIZON_FOLD_STORAGE_KEY) === "1";
   let prepStageKey = page.dataset.maintPrepStage || "need-prep";
   let prepActionState = parseMaintenanceStageActionState(page.dataset.maintPrepAction || "");
+  let prepSelectedTaskIds = parseMaintenanceTaskIdList(page.dataset.maintPrepSelected || "");
+  let builderSectionState = parseMaintenanceBuilderSectionState(page.dataset.maintBuilderSections || "");
+  let faultEditorState = page.dataset.maintFaultEditor || "";
   page.dataset.maintPrepHorizon = prepHorizonProgress;
   const taskLookup = () => buildMaintenanceStageTaskLookup(maintenanceData, prepHorizonMap);
 
   const selectedTask = () => taskLookup().get(selectedTaskId);
+  const setPrepSelectedTaskIds = (taskIds = []) => {
+    prepSelectedTaskIds = dedupeStrings(taskIds.map((item) => String(item || "").trim()).filter(Boolean));
+    if (prepSelectedTaskIds.length) {
+      page.dataset.maintPrepSelected = JSON.stringify(prepSelectedTaskIds);
+    } else {
+      delete page.dataset.maintPrepSelected;
+    }
+  };
+  const placeMaintenancePartsOrders = async (tasks = [], clearTaskIds = []) => {
+    const orderableTasks = tasks
+      .filter((task) => maintenanceTaskOrderableParts(task).length)
+      .map((task) => ({
+        taskId: task.task_id,
+        component: task.component,
+        task: task.task,
+        parts: maintenanceTaskOrderableParts(task),
+      }));
+    if (!orderableTasks.length) {
+      maintenanceStageFlash = { kind: "warn", message: "No missing parts in this selection." };
+      prepActionState = null;
+      delete page.dataset.maintPrepAction;
+      renderMaintenanceWorkspace();
+      return;
+    }
+    const result = await postJson("/api/maintenance/create-parts-orders", { tasks: orderableTasks });
+    const orderedTaskCount = orderableTasks.length;
+    const orderedPartCount = orderableTasks.reduce((sum, task) => sum + (task.parts || []).length, 0);
+    maintenanceStageFlash = {
+      kind: "good",
+      message: result.message || `${orderedPartCount} part order${orderedPartCount === 1 ? "" : "s"} placed for ${orderedTaskCount} task${orderedTaskCount === 1 ? "" : "s"}. Waiting for parts now.`,
+    };
+    prepActionState = null;
+    delete page.dataset.maintPrepAction;
+    bootstrapData = result.bootstrap || bootstrapData;
+    maintenanceData = bootstrapData?.maintenance || maintenanceData;
+    activeView = "plan";
+    page.dataset.maintView = activeView;
+    prepStageKey = "need-prep";
+    page.dataset.maintPrepStage = prepStageKey;
+    if (clearTaskIds.length) {
+      setPrepSelectedTaskIds(prepSelectedTaskIds.filter((item) => !clearTaskIds.includes(item)));
+    } else {
+      setPrepSelectedTaskIds([]);
+    }
+    selectedTaskId = orderableTasks[0]?.taskId || selectedTaskId;
+    page.dataset.maintTaskId = selectedTaskId;
+    renderMaintenanceWorkspace();
+  };
 
   const renderMaintenanceGroupRoot = () => `
     ${activeView === "plan"
       ? ""
       : `
         <div class="maintenance-shared-timeline">
-          ${maintenanceHeaderTimelineMarkup(maintenanceData)}
+          ${maintenanceHeaderTimelineMarkup(maintenanceData, prepHorizonMap, {
+            sourceTasks: activeView === "builder" ? maintenancePrepTimelineSourceTasks(maintenanceData) : undefined,
+            showPreviewItems: activeView !== "builder",
+          })}
         </div>
       `}
     <div class="maintenance-mode-strip">
@@ -12204,14 +14414,97 @@ function bindMaintenancePage(maintenanceData) {
           component: componentFilter,
           package: packageFilter,
           open: pickerOpen,
+          createOpen: createTaskOpen,
+        }, maintenanceData.tasks || []);
+        bindMaintenanceBuilderSections(builderRoot, builderSectionState, (nextState) => {
+          builderSectionState = nextState;
+          page.dataset.maintBuilderSections = JSON.stringify(builderSectionState);
         });
         const builderPicker = builderRoot.querySelector(".maintenance-builder-picker");
+        const createToggles = Array.from(builderRoot.querySelectorAll("[data-maint-create-toggle]") || []);
+        const pickerLaunchers = Array.from(builderRoot.querySelectorAll("[data-maint-open-picker]") || []);
+        const editTaskButtons = Array.from(builderRoot.querySelectorAll("[data-maint-edit-task-name]") || []);
+        const createForm = builderRoot.querySelector("#maintenance-builder-create-form");
         const builderSearchInput = builderRoot.querySelector("#maintenance-builder-search-input");
         const builderComponentFilter = builderRoot.querySelector("#maintenance-builder-component-filter");
         const builderPackageFilter = builderRoot.querySelector("#maintenance-builder-package-filter");
         builderPicker?.addEventListener("toggle", () => {
           pickerOpen = builderPicker.open;
           page.dataset.maintPickerOpen = pickerOpen ? "1" : "0";
+        });
+        createToggles.forEach((createToggle) => {
+          createToggle.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            pickerOpen = true;
+            createTaskOpen = !createTaskOpen;
+            page.dataset.maintPickerOpen = "1";
+            page.dataset.maintCreateTaskOpen = createTaskOpen ? "1" : "0";
+            renderMaintenanceWorkspace();
+          });
+        });
+        pickerLaunchers.forEach((launcher) => {
+          launcher.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            pickerOpen = true;
+            page.dataset.maintPickerOpen = "1";
+            page.dataset.maintCreateTaskOpen = createTaskOpen ? "1" : "0";
+            renderMaintenanceWorkspace();
+          });
+        });
+        editTaskButtons.forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const taskProfileSection = Array.from(builderRoot.querySelectorAll(".maintenance-builder-section") || []).find((section) => {
+              const label = String(section.querySelector(".maintenance-builder-section-head span")?.textContent || "").trim().toLowerCase();
+              return label === "task profile";
+            });
+            const taskProfileHead = taskProfileSection?.querySelector(".maintenance-builder-section-head");
+            if (taskProfileSection?.classList.contains("is-collapsed")) {
+              taskProfileHead?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+            }
+            window.requestAnimationFrame(() => {
+              const taskInput = builderRoot.querySelector('#maintenance-builder-form input[name="task"]');
+              taskInput?.scrollIntoView({ block: "center", behavior: "smooth" });
+              taskInput?.focus();
+              taskInput?.select?.();
+            });
+          });
+        });
+        createForm?.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          const formData = new FormData(createForm);
+          const payload = {
+            sourceFile: String(formData.get("sourceFile") || "").trim(),
+            component: String(formData.get("component") || "").trim() || "General",
+            task: String(formData.get("task") || "").trim(),
+            taskGroup: String(formData.get("taskGroup") || "").trim() || "General",
+          };
+          if (!payload.task) {
+            window.alert("Task name is required.");
+            return;
+          }
+          try {
+            const result = await postJson("/api/maintenance/create-task", payload);
+            bootstrapData = result.bootstrap || null;
+            selectedTaskId = String(result.taskId || "").trim();
+            searchValue = "";
+            componentFilter = "";
+            packageFilter = "";
+            pickerOpen = true;
+            createTaskOpen = false;
+            page.dataset.maintTaskId = selectedTaskId;
+            page.dataset.maintSearch = "";
+            page.dataset.maintComponent = "";
+            page.dataset.maintPackage = "";
+            page.dataset.maintPickerOpen = "1";
+            page.dataset.maintCreateTaskOpen = "0";
+            await renderRoute();
+          } catch (error) {
+            window.alert(error?.message || "Failed to create maintenance task.");
+          }
         });
         builderSearchInput?.addEventListener("input", () => {
           pickerOpen = true;
@@ -12243,6 +14536,28 @@ function bindMaintenancePage(maintenanceData) {
             renderMaintenanceWorkspace();
           });
         });
+        Array.from(builderRoot.querySelectorAll("[data-maint-delete-task]") || []).forEach((button) => {
+          button.addEventListener("click", async () => {
+            const taskId = String(button.dataset.maintDeleteTask || "").trim();
+            const component = String(button.dataset.maintDeleteComponent || "").trim();
+            const taskLabel = String(button.dataset.maintDeleteLabel || "").trim();
+            const sourceFile = String(button.dataset.maintDeleteSource || "").trim();
+            const confirmed = window.confirm(`Delete maintenance task "${component} — ${taskLabel}" from the builder source?`);
+            if (!confirmed) return;
+            const result = await postJson("/api/maintenance/delete-task", {
+              taskId,
+              component,
+              task: taskLabel,
+              sourceFile,
+            });
+            bootstrapData = result.bootstrap || null;
+            if (selectedTaskId === taskId) {
+              selectedTaskId = "";
+              page.dataset.maintTaskId = "";
+            }
+            await renderRoute();
+          });
+        });
         const form = builderRoot.querySelector("#maintenance-builder-form");
         const fallRiskSelect = builderRoot.querySelector("#maintenance-fall-risk-select");
         const tnmPresenceInput = builderRoot.querySelector("#maintenance-tnm-presence-input");
@@ -12250,11 +14565,16 @@ function bindMaintenancePage(maintenanceData) {
         const requiredPartsSearch = builderRoot.querySelector("#maintenance-required-parts-search");
         const requiredPartsSelected = builderRoot.querySelector("#maintenance-required-parts-selected");
         const requiredPartsSuggestions = builderRoot.querySelector("#maintenance-required-parts-suggestions");
+        const requiredToolsInput = builderRoot.querySelector("#maintenance-required-tools-input");
+        const requiredToolsSearch = builderRoot.querySelector("#maintenance-required-tools-search");
+        const requiredToolsSelected = builderRoot.querySelector("#maintenance-required-tools-selected");
+        const requiredToolsSuggestions = builderRoot.querySelector("#maintenance-required-tools-suggestions");
         const photoInput = builderRoot.querySelector("#maintenance-photo-file-input");
         const photoValueInput = builderRoot.querySelector("#maintenance-procedure-photos-input");
         const checklistEditors = Array.from(builderRoot.querySelectorAll("[data-maint-checklist-editor]") || []);
         const builderMeta = collectMaintenanceBuilderMeta(rows);
         let selectedParts = parseBuilderPartsValue(requiredPartsInput?.value || "");
+        let selectedTools = parseBuilderPartsValue(requiredToolsInput?.value || "");
         let photoItems = parseBuilderPhotoItems(photoValueInput?.value || "");
         let pendingPhotoUploads = [];
         let pendingPhotoTarget = null;
@@ -12295,6 +14615,30 @@ function bindMaintenancePage(maintenanceData) {
               selectedParts = selectedParts.filter((item) => item !== button.dataset.maintPartChip);
               syncRequiredPartsField();
               renderPartSuggestions(requiredPartsSearch?.value || "");
+            });
+          });
+        };
+
+        const syncRequiredToolsField = () => {
+          if (!requiredToolsInput || !requiredToolsSelected) return;
+          requiredToolsInput.value = selectedTools.join("; ");
+          requiredToolsSelected.innerHTML = selectedTools.length
+            ? selectedTools
+                .map(
+                  (tool) => `
+                    <button class="maintenance-parts-chip maintenance-parts-chip-tool" type="button" data-maint-tool-chip="${escapeHtml(tool)}">
+                      <span>${escapeHtml(tool)}</span>
+                      <strong>×</strong>
+                    </button>
+                  `,
+                )
+                .join("")
+            : `<span class="maintenance-parts-placeholder">Add inventory tools</span>`;
+          Array.from(requiredToolsSelected.querySelectorAll("[data-maint-tool-chip]")).forEach((button) => {
+            button.addEventListener("click", () => {
+              selectedTools = selectedTools.filter((item) => item !== button.dataset.maintToolChip);
+              syncRequiredToolsField();
+              renderToolSuggestions(requiredToolsSearch?.value || "");
             });
           });
         };
@@ -12353,6 +14697,61 @@ function bindMaintenancePage(maintenanceData) {
             });
           };
           Array.from(requiredPartsSuggestions.querySelectorAll("[data-maint-part-option]")).forEach(bindSuggestion);
+        };
+
+        const scoreToolSuggestion = (tool, needle) => {
+          const lowered = String(tool || "").toLowerCase();
+          let score = 0;
+          if (needle && lowered.startsWith(needle)) score += 6;
+          if (needle && lowered.includes(needle)) score += 3;
+          if (builderContextNeedle && builderContextNeedle.includes(lowered)) score += 4;
+          if (task?.required_tools?.includes(tool)) score += 2;
+          return score;
+        };
+
+        const renderToolSuggestions = (query = "") => {
+          if (!requiredToolsSuggestions) return;
+          const needle = String(query || "").trim().toLowerCase();
+          if (!needle) {
+            requiredToolsSuggestions.innerHTML = "";
+            return;
+          }
+          const suggestions = builderMeta.toolOptions
+            .filter((item) => !selectedTools.includes(item))
+            .filter((item) => !needle || item.toLowerCase().includes(needle))
+            .sort((left, right) => scoreToolSuggestion(right, needle) - scoreToolSuggestion(left, needle) || left.localeCompare(right))
+            .slice(0, 10);
+          requiredToolsSuggestions.innerHTML = suggestions.length
+            ? suggestions
+                .map(
+                  (tool) => `
+                    <div class="maintenance-parts-suggestion" role="button" tabindex="0" data-maint-tool-option="${escapeHtml(tool)}">
+                      <div class="maintenance-parts-suggestion-copy">
+                        <strong>${escapeHtml(tool)}</strong>
+                        <span>Relevant tool match</span>
+                      </div>
+                      <em>Add</em>
+                    </div>
+                  `,
+                )
+                .join("")
+            : `<span class="maintenance-parts-empty">No relevant tool match</span>`;
+          const bindSuggestion = (node) => {
+            node.addEventListener("click", () => {
+              const option = node.dataset.maintToolOption;
+              if (!option) return;
+              selectedTools = dedupeStrings([...selectedTools, option]);
+              if (requiredToolsSearch) requiredToolsSearch.value = "";
+              syncRequiredToolsField();
+              renderToolSuggestions("");
+            });
+            node.addEventListener("keydown", (event) => {
+              if (!["Enter", " "].includes(event.key)) return;
+              event.preventDefault();
+              node.click();
+            });
+          };
+          Array.from(requiredToolsSuggestions.querySelectorAll("[data-maint-tool-option]")).forEach(bindSuggestion);
         };
 
         const releasePhotoPreview = (photo) => {
@@ -12783,6 +15182,17 @@ function bindMaintenancePage(maintenanceData) {
           syncRequiredPartsField();
           renderPartSuggestions("");
         });
+        requiredToolsSearch?.addEventListener("input", () => renderToolSuggestions(requiredToolsSearch.value || ""));
+        requiredToolsSearch?.addEventListener("keydown", (event) => {
+          if (event.key !== "Enter") return;
+          event.preventDefault();
+          const typedValue = String(requiredToolsSearch.value || "").trim();
+          if (!typedValue) return;
+          selectedTools = dedupeStrings([...selectedTools, typedValue]);
+          requiredToolsSearch.value = "";
+          syncRequiredToolsField();
+          renderToolSuggestions("");
+        });
         photoInput?.addEventListener("change", async () => {
           const files = Array.from(photoInput.files || []);
           if (!files.length) {
@@ -12794,7 +15204,9 @@ function bindMaintenancePage(maintenanceData) {
         });
         syncTnmField();
         syncRequiredPartsField();
+        syncRequiredToolsField();
         renderPartSuggestions("");
+        renderToolSuggestions("");
         checklistEditors.forEach((editor) => {
           if (editor.dataset.maintSanityTemplateEditor) return;
           bindChecklistEditor(editor);
@@ -12829,19 +15241,23 @@ function bindMaintenancePage(maintenanceData) {
       }
       const laneActionMarkup = (() => {
         if (activeView === "plan") {
+          const planState = String(task?.status || "").trim().toUpperCase();
           return `
             <div class="maintenance-lane-actions-head">
               <span>Preparation actions</span>
               <strong>Move this task into the next ready state</strong>
             </div>
             <label class="field-block">
-              <span>Prep note</span>
+              <span>Readiness note</span>
               <textarea id="maintenance-note-input" rows="3" placeholder="Prep note / part check / what still needs to happen">${task.wait_note || ""}</textarea>
             </label>
             <div class="maintenance-state-actions">
-              <button class="action-btn action-secondary" type="button" data-maint-state="PREP_READY">Prep ready</button>
-              <button class="action-btn action-secondary" type="button" data-maint-state="BLOCKED_PARTS">Needs parts</button>
-              <button class="action-btn action-primary" type="button" data-maint-state="IN_PROGRESS">Send to execute</button>
+              <button class="action-btn action-secondary" type="button" data-maint-state="PREP_READY">Need prep</button>
+              <button class="action-btn action-secondary" type="button" data-maint-state="WAIT FOR PART">Wait for part</button>
+              <button class="action-btn action-secondary" type="button" data-maint-state="PREP_DONE">Ready</button>
+              ${planState === "PREP_DONE"
+                ? `<button class="action-btn action-primary" type="button" data-maint-state="SCHEDULED">Queue for execute</button>`
+                : ""}
             </div>
           `;
         }
@@ -12857,7 +15273,7 @@ function bindMaintenancePage(maintenanceData) {
             </label>
             <div class="maintenance-state-actions">
               <button class="action-btn action-secondary" type="button" data-maint-state="IN_PROGRESS">Start / resume</button>
-              <button class="action-btn action-secondary" type="button" data-maint-state="BLOCKED_PARTS">Block on parts</button>
+              <button class="action-btn action-secondary" type="button" data-maint-state="WAIT FOR PART">Wait for part</button>
               <button class="action-btn action-primary" type="button" data-maint-complete="1">Mark done</button>
             </div>
           `;
@@ -12944,7 +15360,7 @@ function bindMaintenancePage(maintenanceData) {
       const task = selectedTask() || rows[0] || maintenanceData.tasks[0];
       const contextMarkup = `
         ${maintenanceModeLeadMarkup(activeView, maintenanceData, task)}
-        ${maintenanceModeContextMarkup(activeView, maintenanceData, task, prepCutoffProgress, prepReadyProgress, prepFocusLaneKey, prepHorizonProgress, prepHorizonFoldOpen, prepStageKey, prepActionState)}
+        ${maintenanceModeContextMarkup(activeView, maintenanceData, task, prepCutoffProgress, prepReadyProgress, prepFocusLaneKey, prepHorizonProgress, prepHorizonFoldOpen, prepStageKey, prepActionState, prepSelectedTaskIds)}
       `;
       if (contextRoot) contextRoot.innerHTML = contextMarkup;
       if (executeLauncherRoot) {
@@ -13117,13 +15533,42 @@ function bindMaintenancePage(maintenanceData) {
     const task = selectedTask() || rows[0] || maintenanceData.tasks[0];
     const contextMarkup = `
         ${maintenanceModeLeadMarkup(activeView, maintenanceData, task)}
-        ${maintenanceModeContextMarkup(activeView, maintenanceData, task, prepCutoffProgress, prepReadyProgress, prepFocusLaneKey, prepHorizonProgress, prepHorizonFoldOpen, prepStageKey, prepActionState)}
+        ${maintenanceModeContextMarkup(activeView, maintenanceData, task, prepCutoffProgress, prepReadyProgress, prepFocusLaneKey, prepHorizonProgress, prepHorizonFoldOpen, prepStageKey, prepActionState, prepSelectedTaskIds)}
       `;
     if (activeView === "plan" && planPrimaryRoot) {
       planPrimaryRoot.innerHTML = contextMarkup;
     } else if (contextRoot) {
       contextRoot.innerHTML = contextMarkup;
     }
+    const refreshPrepHorizonLiveShell = () => {
+      if (activeView !== "plan") return;
+      const liveShell = groupRoot.querySelector('[data-maint-prep-live-shell="1"]');
+      if (!liveShell) return;
+      const sourceRows = maintenancePrepTimelineSourceTasks(maintenanceData);
+      const lanes = buildMaintenanceTimelineLanes(maintenanceData, {
+        sourceTasks: sourceRows,
+        limit: 24,
+        horizonMap: prepHorizonMap,
+      });
+      const demoNow = new Date();
+      const laneProgressMap = maintenanceExecuteProgressMapForLanes(lanes, selectedTaskId, prepCutoffMap);
+      const lanePrepMap = maintenancePrepProgressMapForLanes(lanes, prepReadyMap);
+      const executeTasksBefore = maintenanceUniqueTasks(
+        maintenancePlottedTasksBeforeMarker(lanes, laneProgressMap, { demoNow, demoSourceRows: sourceRows }),
+      );
+      const prepTasksBefore = maintenanceUniqueTasks(
+        maintenancePlottedTasksBeforeMarker(lanes, lanePrepMap, { demoNow, demoSourceRows: sourceRows }),
+      );
+      liveShell.outerHTML = maintenancePrepLiveShellMarkup(
+        maintenanceData,
+        executeTasksBefore,
+        prepTasksBefore,
+        prepStageKey,
+        maintenanceStageFlash,
+        prepActionState,
+        prepSelectedTaskIds,
+      );
+    };
     searchInput?.addEventListener("input", () => {
       searchValue = searchInput.value || "";
       page.dataset.maintSearch = searchValue;
@@ -13150,24 +15595,6 @@ function bindMaintenancePage(maintenanceData) {
             const laneKind = maintenanceTimelineLaneForTask(task);
             prepFocusLaneKey = laneKind;
             page.dataset.maintPrepFocusLane = prepFocusLaneKey;
-            const lanes = buildMaintenanceTimelineLanes(maintenanceData, {
-              sourceTasks: (maintenanceData.prep_queue || []).length ? maintenanceData.prep_queue : (maintenanceData.tasks || []),
-              limit: 24,
-            });
-            const lane = lanes.find((item) => item.kind === laneKind && item.items.some((laneItem) => laneItem.taskId === taskId));
-            const laneItem = lane?.items.find((item) => item.taskId === taskId);
-            if (lane && laneItem && !Number.isFinite(prepCutoffMap[lane.key])) {
-              const min = lane.kind === "calendar" ? lane.min.getTime() : Number(lane.min);
-              const max = lane.kind === "calendar" ? lane.max.getTime() : Number(lane.max);
-              const due = lane.kind === "calendar" ? laneItem.dueValue.getTime() : Number(laneItem.dueValue);
-              const range = Math.max(1, max - min);
-              prepCutoffMap = {
-                ...prepCutoffMap,
-                [lane.key]: Math.max(0.04, Math.min(0.98, (due - min) / range)),
-              };
-              prepCutoffProgress = JSON.stringify(prepCutoffMap);
-              page.dataset.maintPrepCutoff = prepCutoffProgress;
-            }
           }
         }
         renderMaintenanceWorkspace();
@@ -13180,46 +15607,87 @@ function bindMaintenancePage(maintenanceData) {
         renderMaintenanceWorkspace();
       });
     });
+    Array.from(groupRoot.querySelectorAll("[data-maint-stage-select]")).forEach((input) => {
+      input.addEventListener("change", () => {
+        const taskId = String(input.dataset.maintStageSelect || "").trim();
+        if (!taskId) return;
+        if (input.checked) {
+          setPrepSelectedTaskIds([...prepSelectedTaskIds, taskId]);
+        } else {
+          setPrepSelectedTaskIds(prepSelectedTaskIds.filter((item) => item !== taskId));
+        }
+        renderMaintenanceWorkspace();
+      });
+    });
+    Array.from(groupRoot.querySelectorAll("[data-maint-stage-clear-selection]")).forEach((button) => {
+      button.addEventListener("click", () => {
+        setPrepSelectedTaskIds([]);
+        renderMaintenanceWorkspace();
+      });
+    });
     Array.from(groupRoot.querySelectorAll("[data-maint-stage-action]")).forEach((button) => {
       button.addEventListener("click", async () => {
         const action = button.dataset.maintStageAction || "";
         const taskId = button.dataset.maintStageTask || "";
         const taskForAction = taskLookup().get(taskId);
         if (!action || !taskForAction) return;
-        const defaultScheduleWindow = (maintenanceData?.maintenance_events || []).find((item) => item?.start && item?.end) || null;
-        if (action === "schedule" && defaultScheduleWindow) {
+        if (action === "prep-done") {
+          const sourceRows = maintenancePrepTimelineSourceTasks(maintenanceData);
+          const lanes = buildMaintenanceTimelineLanes(maintenanceData, {
+            sourceTasks: sourceRows,
+            limit: 24,
+            horizonMap: prepHorizonMap,
+          });
+          const laneProgressMap = maintenanceExecuteProgressMapForLanes(lanes, selectedTaskId, prepCutoffMap);
+          const executeTasksBefore = maintenanceUniqueTasks(
+            maintenancePlottedTasksBeforeMarker(lanes, laneProgressMap, { demoNow: new Date(), demoSourceRows: sourceRows }),
+          );
+          const taskIsInExecuteWindow = new Set(
+            executeTasksBefore
+              .map((item) => maintenanceCanonicalTaskId(item) || String(item?.task_id || "").trim())
+              .filter(Boolean),
+          ).has(maintenanceCanonicalTaskId(taskForAction) || String(taskForAction?.task_id || "").trim());
+          const overrideNote = "Marked ready from plan.";
+          const existingNote = String(taskForAction.wait_note || "").trim();
+          const mergedNote = existingNote
+            ? (existingNote.includes(overrideNote) ? existingNote : `${existingNote} | ${overrideNote}`)
+            : overrideNote;
           try {
-            const result = await postJson("/api/maintenance/schedule", {
-              tasks: [{
-                taskId: maintenanceCanonicalTaskId(taskForAction),
-                component: taskForAction.component,
-                task: taskForAction.task,
-              }],
-              windows: [{
-                start: defaultScheduleWindow.start,
-                end: defaultScheduleWindow.end,
-                label: defaultScheduleWindow.date_label || defaultScheduleWindow.start_label || "",
-              }],
-              eventType: "Maintenance",
+            const result = await postJson("/api/maintenance/state", {
+              taskId,
+              component: taskForAction.component,
+              task: taskForAction.task,
+              state: "PREP_DONE",
+              note: mergedNote,
             });
-            maintenanceStageFlash = { kind: "good", message: result.message || "Maintenance scheduled." };
+            maintenanceStageFlash = {
+              kind: "good",
+              message: taskIsInExecuteWindow
+                ? `${taskForAction.component || "Task"} is now ready to execute.`
+                : `${taskForAction.component || "Task"} is marked ready. It will show in ready to execute after the execute marker reaches it.`,
+            };
             prepActionState = null;
             delete page.dataset.maintPrepAction;
             bootstrapData = result.bootstrap || bootstrapData;
             maintenanceData = bootstrapData?.maintenance || maintenanceData;
             activeView = "plan";
             page.dataset.maintView = activeView;
-            prepStageKey = "scheduled";
+            prepStageKey = taskIsInExecuteWindow ? "ready" : "need-prep";
             page.dataset.maintPrepStage = prepStageKey;
-            const scheduledAfter = (maintenanceData.execute_queue || []).filter((item) => String(item?.status || "").trim().toUpperCase() === "SCHEDULED");
-            const canonicalTaskId = maintenanceCanonicalTaskId(taskForAction);
-            selectedTaskId = (
-              scheduledAfter.find((item) => maintenanceCanonicalTaskId(item) === canonicalTaskId)
-              || taskForAction
-              || {}
-            ).task_id || canonicalTaskId || "";
+            setPrepSelectedTaskIds([]);
+            selectedTaskId = taskId;
             page.dataset.maintTaskId = selectedTaskId;
             renderMaintenanceWorkspace();
+            return;
+          } catch (error) {
+            maintenanceStageFlash = { kind: "bad", message: error.message };
+            renderMaintenanceWorkspace();
+            return;
+          }
+        }
+        if (action === "order-parts") {
+          try {
+            await placeMaintenancePartsOrders([taskForAction], [taskId]);
             return;
           } catch (error) {
             maintenanceStageFlash = { kind: "bad", message: error.message };
@@ -13235,11 +15703,21 @@ function bindMaintenancePage(maintenanceData) {
       });
     });
     Array.from(groupRoot.querySelectorAll("[data-maint-stage-bulk]")).forEach((button) => {
-      button.addEventListener("click", () => {
+      button.addEventListener("click", async () => {
         const action = button.dataset.maintStageBulk || "";
         const taskIds = String(button.dataset.maintStageTaskIds || "").split(",").map((item) => item.trim()).filter(Boolean);
         const tasks = taskIds.map((taskId) => taskLookup().get(taskId)).filter(Boolean);
         if (!action || !tasks.length) return;
+        if (action === "order-all") {
+          try {
+            await placeMaintenancePartsOrders(tasks, taskIds);
+            return;
+          } catch (error) {
+            maintenanceStageFlash = { kind: "bad", message: error.message };
+            renderMaintenanceWorkspace();
+            return;
+          }
+        }
         prepActionState = { action, confirmAction: action, mode: "bulk", taskIds };
         page.dataset.maintPrepAction = JSON.stringify(prepActionState);
         renderMaintenanceWorkspace();
@@ -13270,26 +15748,14 @@ function bindMaintenancePage(maintenanceData) {
         if (!action || !tasks.length || !firstTask) return;
 
         try {
-          if (action === "build-package") {
-            selectedTaskId = firstTask.task_id;
-            page.dataset.maintTaskId = selectedTaskId;
-            prepActionState = null;
-            delete page.dataset.maintPrepAction;
-            maintenanceStageFlash = { kind: "info", message: `Opened builder for ${firstTask.component}.` };
-            activeView = "builder";
-            page.dataset.maintView = activeView;
-            renderMaintenanceWorkspace();
-            return;
-          }
-
           if (action === "order-parts" || action === "order-all") {
             const orderableTasks = tasks
-              .filter((task) => (task.missing_parts || []).length)
+              .filter((task) => maintenanceTaskOrderableParts(task).length)
               .map((task) => ({
                 taskId: task.task_id,
                 component: task.component,
                 task: task.task,
-                parts: task.missing_parts || [],
+                parts: maintenanceTaskOrderableParts(task),
               }));
             if (!orderableTasks.length) {
               maintenanceStageFlash = { kind: "warn", message: "No missing parts in this selection." };
@@ -13307,18 +15773,6 @@ function bindMaintenancePage(maintenanceData) {
             return;
           }
 
-          if (action === "blocked") {
-            selectedTaskId = firstTask.task_id;
-            page.dataset.maintTaskId = selectedTaskId;
-            prepActionState = null;
-            delete page.dataset.maintPrepAction;
-            maintenanceStageFlash = { kind: "info", message: `Opened blocked lane for ${firstTask.component}.` };
-            activeView = "blocked";
-            page.dataset.maintView = activeView;
-            renderMaintenanceWorkspace();
-            return;
-          }
-
           if (action === "parts") {
             prepActionState = null;
             delete page.dataset.maintPrepAction;
@@ -13328,11 +15782,18 @@ function bindMaintenancePage(maintenanceData) {
           }
 
           if (action === "schedule" || action === "schedule-all") {
-            const windows = (selectedWindow.start && selectedWindow.end)
-              ? [selectedWindow]
-              : (scheduleWindow?.start && scheduleWindow?.end ? [{ start: scheduleWindow.start, end: scheduleWindow.end, label: scheduleWindow.date_label || scheduleWindow.start_label || "" }] : []);
+            const windowSeed = (selectedWindow.start && selectedWindow.end)
+              ? selectedWindow
+              : (scheduleWindow?.start && scheduleWindow?.end
+                ? {
+                    start: scheduleWindow.start,
+                    end: scheduleWindow.end,
+                    label: scheduleWindow.date_label || scheduleWindow.start_label || "",
+                  }
+                : null);
+            const windows = buildMaintenanceScheduleWindows(tasks, windowSeed);
             if (!windows.length) {
-              maintenanceStageFlash = { kind: "bad", message: "No maintenance window is available for scheduling." };
+              maintenanceStageFlash = { kind: "bad", message: "Choose a valid start and end time for scheduling." };
               renderMaintenanceWorkspace();
               return;
             }
@@ -13345,7 +15806,12 @@ function bindMaintenancePage(maintenanceData) {
               windows,
               eventType: "Maintenance",
             });
-            maintenanceStageFlash = { kind: "good", message: result.message || "Maintenance scheduled." };
+            maintenanceStageFlash = {
+              kind: "good",
+              message: tasks.length > 1
+                ? `${result.message || "Maintenance scheduled."} Tasks were spread across the chosen interval and added to the app calendar.`
+                : `${result.message || "Maintenance scheduled."} The task was added to the app calendar.`,
+            };
             prepActionState = null;
             delete page.dataset.maintPrepAction;
             bootstrapData = result.bootstrap || bootstrapData;
@@ -13354,6 +15820,7 @@ function bindMaintenancePage(maintenanceData) {
             page.dataset.maintView = activeView;
             prepStageKey = "scheduled";
             page.dataset.maintPrepStage = prepStageKey;
+            setPrepSelectedTaskIds(prepSelectedTaskIds.filter((item) => !taskIds.includes(item)));
             const scheduledAfter = (maintenanceData.execute_queue || []).filter((item) => String(item?.status || "").trim().toUpperCase() === "SCHEDULED");
             const firstCanonicalTaskId = maintenanceCanonicalTaskId(firstTask);
             selectedTaskId = (
@@ -13402,12 +15869,21 @@ function bindMaintenancePage(maintenanceData) {
         const laneKey = handle.dataset.maintHorizonCutoff;
         if (!track) return;
         event.preventDefault();
+        const dragStartX = event.clientX;
+        const currentLeftPercent = Number.parseFloat(handle.style.left || "0");
+        const currentValue = Number.isFinite(currentLeftPercent) ? currentLeftPercent / 100 : 0;
+        const initialRect = track.getBoundingClientRect();
+        const initialHandleX = initialRect.left + (currentValue * initialRect.width);
+        const dragOffset = event.clientX - initialHandleX;
+        let didDrag = false;
         const updateCutoff = (clientX) => {
           const rect = track.getBoundingClientRect();
           if (!rect.width || !laneKey) return;
           prepFocusLaneKey = laneKey;
           page.dataset.maintPrepFocusLane = prepFocusLaneKey;
-          const nextValue = Math.max(0.04, Math.min(0.98, (clientX - rect.left) / rect.width));
+          const markerX = clientX - dragOffset;
+          const rawValue = Math.max(0, Math.min(0.98, (markerX - rect.left) / rect.width));
+          const nextValue = rawValue <= 0.01 ? 0 : (rawValue >= 0.97 ? 0.98 : rawValue);
           prepCutoffMap = {
             ...prepCutoffMap,
             [laneKey]: nextValue,
@@ -13417,19 +15893,31 @@ function bindMaintenancePage(maintenanceData) {
           Array.from(groupRoot.querySelectorAll(`[data-maint-horizon-cutoff="${laneKey}"]`)).forEach((line) => {
             line.style.left = `${nextValue * 100}%`;
           });
+          Array.from(groupRoot.querySelectorAll(`[data-maint-horizon-cutoff-band="${laneKey}"]`)).forEach((band) => {
+            band.style.width = `${nextValue * 100}%`;
+          });
+          Array.from(track.querySelectorAll("[data-maint-horizon-progress]")).forEach((pin) => {
+            const pinProgress = Number(pin.dataset.maintHorizonProgress || 0);
+            pin.classList.toggle("is-before-cutoff", pinProgress <= nextValue + 0.0001);
+          });
+          refreshPrepHorizonLiveShell();
         };
         const onMove = (moveEvent) => {
+          if (!didDrag && Math.abs(moveEvent.clientX - dragStartX) < 3) return;
+          if (!didDrag) {
+            didDrag = true;
+            document.body.classList.add("is-maint-dragging-cutoff");
+          }
           updateCutoff(moveEvent.clientX);
         };
         const onUp = (upEvent) => {
-          updateCutoff(upEvent.clientX);
           window.removeEventListener("mousemove", onMove);
           window.removeEventListener("mouseup", onUp);
           document.body.classList.remove("is-maint-dragging-cutoff");
+          if (!didDrag) return;
+          updateCutoff(upEvent.clientX);
           renderMaintenanceWorkspace();
         };
-        document.body.classList.add("is-maint-dragging-cutoff");
-        updateCutoff(event.clientX);
         window.addEventListener("mousemove", onMove);
         window.addEventListener("mouseup", onUp);
       });
@@ -13440,12 +15928,21 @@ function bindMaintenancePage(maintenanceData) {
         const laneKey = handle.dataset.maintHorizonPrep;
         if (!track) return;
         event.preventDefault();
+        const dragStartX = event.clientX;
+        const currentLeftPercent = Number.parseFloat(handle.style.left || "0");
+        const currentValue = Number.isFinite(currentLeftPercent) ? currentLeftPercent / 100 : 0;
+        const initialRect = track.getBoundingClientRect();
+        const initialHandleX = initialRect.left + (currentValue * initialRect.width);
+        const dragOffset = event.clientX - initialHandleX;
+        let didDrag = false;
         const updatePrep = (clientX) => {
           const rect = track.getBoundingClientRect();
           if (!rect.width || !laneKey) return;
           prepFocusLaneKey = laneKey;
           page.dataset.maintPrepFocusLane = prepFocusLaneKey;
-          const nextValue = Math.max(0.04, Math.min(0.98, (clientX - rect.left) / rect.width));
+          const markerX = clientX - dragOffset;
+          const rawValue = Math.max(0, Math.min(0.98, (markerX - rect.left) / rect.width));
+          const nextValue = rawValue <= 0.01 ? 0 : (rawValue >= 0.97 ? 0.98 : rawValue);
           prepReadyMap = {
             ...prepReadyMap,
             [laneKey]: nextValue,
@@ -13455,19 +15952,27 @@ function bindMaintenancePage(maintenanceData) {
           Array.from(groupRoot.querySelectorAll(`[data-maint-horizon-prep="${laneKey}"]`)).forEach((line) => {
             line.style.left = `${nextValue * 100}%`;
           });
+          Array.from(groupRoot.querySelectorAll(`[data-maint-horizon-prep-band="${laneKey}"]`)).forEach((band) => {
+            band.style.width = `${nextValue * 100}%`;
+          });
+          refreshPrepHorizonLiveShell();
         };
         const onMove = (moveEvent) => {
+          if (!didDrag && Math.abs(moveEvent.clientX - dragStartX) < 3) return;
+          if (!didDrag) {
+            didDrag = true;
+            document.body.classList.add("is-maint-dragging-cutoff");
+          }
           updatePrep(moveEvent.clientX);
         };
         const onUp = (upEvent) => {
-          updatePrep(upEvent.clientX);
           window.removeEventListener("mousemove", onMove);
           window.removeEventListener("mouseup", onUp);
           document.body.classList.remove("is-maint-dragging-cutoff");
+          if (!didDrag) return;
+          updatePrep(upEvent.clientX);
           renderMaintenanceWorkspace();
         };
-        document.body.classList.add("is-maint-dragging-cutoff");
-        updatePrep(event.clientX);
         window.addEventListener("mousemove", onMove);
         window.addEventListener("mouseup", onUp);
       });
@@ -13520,10 +16025,46 @@ function bindMaintenancePage(maintenanceData) {
     }
   };
 
+  const renderFaultWorkspace = () => {
+    groupRoot.innerHTML = maintenanceFaultsWorkspaceMarkup(maintenanceData, faultEditorState);
+    const createForm = groupRoot.querySelector("#maintenance-fault-create-form");
+    createForm?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const payload = {
+        action: "create",
+        ...Object.fromEntries(new FormData(createForm).entries()),
+      };
+      const result = await postJson("/api/maintenance/fault", payload);
+      bootstrapData = result.bootstrap || null;
+      faultEditorState = "";
+      page.dataset.maintFaultEditor = "";
+      await renderRoute();
+    });
+    Array.from(groupRoot.querySelectorAll("[data-maint-fault-toggle]") || []).forEach((button) => {
+      button.addEventListener("click", () => {
+        const nextState = String(button.dataset.maintFaultToggle || "").trim();
+        faultEditorState = faultEditorState === nextState ? "" : nextState;
+        page.dataset.maintFaultEditor = faultEditorState;
+        renderGroup();
+      });
+    });
+    Array.from(groupRoot.querySelectorAll("[data-maint-fault-form]") || []).forEach((form) => {
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const payload = Object.fromEntries(new FormData(form).entries());
+        const result = await postJson("/api/maintenance/fault", payload);
+        bootstrapData = result.bootstrap || null;
+        faultEditorState = "";
+        page.dataset.maintFaultEditor = "";
+        await renderRoute();
+      });
+    });
+  };
+
   const renderGroup = () => {
     if (!groupRoot) return;
     if (activeGroup === "faults") {
-      groupRoot.innerHTML = maintenanceFaultsWorkspaceMarkup(maintenanceData);
+      renderFaultWorkspace();
       return;
     }
     renderMaintenanceWorkspace();
@@ -13552,6 +16093,7 @@ function bindProcessSetupPage(processData) {
   const saveSummary = document.getElementById("ps-save-summary");
   const irisSummary = document.getElementById("ps-iris-summary");
   const readinessRoot = document.getElementById("ps-readiness-summary");
+  const dieAutoSummary = document.getElementById("ps-die-auto-summary");
 
   const irisShape = document.getElementById("ps-iris-shape");
   const irisPreform = document.getElementById("ps-iris-preform");
@@ -13559,35 +16101,170 @@ function bindProcessSetupPage(processData) {
   const irisTiger = document.getElementById("ps-iris-tiger");
   const irisSelected = document.getElementById("ps-iris-selected");
   const irisPm = document.getElementById("ps-iris-pm");
+  const dieMode = document.getElementById("ps-die-mode");
+  const primaryDie = document.getElementById("ps-primary-die");
+  const secondaryDie = document.getElementById("ps-secondary-die");
+  const entryFiber = document.getElementById("ps-entry-fiber");
+  const targetFirst = document.getElementById("ps-target-first");
+  const targetSecond = document.getElementById("ps-target-second");
+  const primaryCoating = document.getElementById("ps-primary-coating");
+  const secondaryCoating = document.getElementById("ps-secondary-coating");
+  const furnaceTemp = document.getElementById("ps-furnace-temp");
+  const primaryTemp = document.getElementById("ps-primary-temp");
+  const secondaryTemp = document.getElementById("ps-secondary-temp");
+  const drawSpeed = document.getElementById("ps-draw-speed");
 
   const isFilled = (value) => String(value ?? "").trim() !== "";
+  let autoDieState = {
+    ready: false,
+    message: "",
+    auto_dies: null,
+    error: false,
+  };
+  let autoDieRequestId = 0;
+  let autoDieTimer = 0;
+
+  const renderAutoDieSummary = () => {
+    if (!dieAutoSummary) return;
+    const autoMode = String(dieMode?.value || "Auto") === "Auto";
+    if (!autoMode) {
+      dieAutoSummary.innerHTML = `
+        <strong>Manual die mode</strong>
+        <p>Choose the primary and secondary dies yourself. Switch back to <strong>Auto</strong> to let the background calculator pick the best pair.</p>
+      `;
+      return;
+    }
+    const summary = autoDieState.auto_dies || {};
+    if (!autoDieState.ready || !summary.primary_die || !summary.secondary_die) {
+      dieAutoSummary.innerHTML = `
+        <strong>Auto die pick</strong>
+        <p>${escapeHtml(autoDieState.message || "Fill the coating targets, coatings, temperatures, and draw speed to auto-pick the best die pair.")}</p>
+      `;
+      return;
+    }
+    dieAutoSummary.innerHTML = `
+      <strong>Auto die pick</strong>
+      <p>${escapeHtml(autoDieState.message || "")}</p>
+      <div class="metric-row compact">
+        <div class="metric-pill tone-good"><span>Primary</span><strong>${escapeHtml(summary.primary_die || "—")}</strong></div>
+        <div class="metric-pill tone-good"><span>Secondary</span><strong>${escapeHtml(summary.secondary_die || "—")}</strong></div>
+        <div class="metric-pill tone-info"><span>Pred FC</span><strong>${summary.predicted_first_um != null ? `${Number(summary.predicted_first_um).toFixed(2)} µm` : "—"}</strong></div>
+        <div class="metric-pill tone-info"><span>Pred SC</span><strong>${summary.predicted_second_um != null ? `${Number(summary.predicted_second_um).toFixed(2)} µm` : "—"}</strong></div>
+        <div class="metric-pill tone-${Math.abs(Number(summary.error_first_um || 0)) <= 2 && Math.abs(Number(summary.error_second_um || 0)) <= 2 ? "good" : "warn"}"><span>Fit</span><strong>Δ1 ${Number(summary.error_first_um || 0).toFixed(2)} · Δ2 ${Number(summary.error_second_um || 0).toFixed(2)}</strong></div>
+      </div>
+    `;
+  };
+
+  const syncDieModeUi = () => {
+    const autoMode = String(dieMode?.value || "Auto") === "Auto";
+    if (primaryDie) primaryDie.disabled = autoMode;
+    if (secondaryDie) secondaryDie.disabled = autoMode;
+    renderAutoDieSummary();
+  };
+
+  const buildAutoDiePayload = () => ({
+    entry_fiber_diameter_um: entryFiber?.value || "",
+    target_first_coating_diameter_um: targetFirst?.value || "",
+    target_second_coating_diameter_um: targetSecond?.value || "",
+    primary_coating: primaryCoating?.value || "",
+    secondary_coating: secondaryCoating?.value || "",
+    primary_temp_c: primaryTemp?.value || "",
+    secondary_temp_c: secondaryTemp?.value || "",
+    draw_speed_m_min: drawSpeed?.value || "",
+  });
+
+  const requestAutoDies = async () => {
+    const autoMode = String(dieMode?.value || "Auto") === "Auto";
+    if (!autoMode) {
+      autoDieState = { ready: false, message: "", auto_dies: null, error: false };
+      syncDieModeUi();
+      renderReadiness();
+      return;
+    }
+    const requestId = ++autoDieRequestId;
+    try {
+      const result = await postJson("/api/process-setup/auto-dies", { coating: buildAutoDiePayload() });
+      if (requestId !== autoDieRequestId) return;
+      autoDieState = {
+        ready: Boolean(result.ready && result.auto_dies),
+        message: String(result.message || ""),
+        auto_dies: result.auto_dies || null,
+        error: false,
+      };
+      if (autoDieState.ready && autoDieState.auto_dies) {
+        if (primaryDie) primaryDie.value = String(autoDieState.auto_dies.primary_die || "");
+        if (secondaryDie) secondaryDie.value = String(autoDieState.auto_dies.secondary_die || "");
+      }
+    } catch (error) {
+      if (requestId !== autoDieRequestId) return;
+      autoDieState = {
+        ready: false,
+        message: error.message || "Could not auto-pick dies.",
+        auto_dies: null,
+        error: true,
+      };
+    }
+    syncDieModeUi();
+    renderReadiness();
+  };
+
+  const queueAutoDieRefresh = () => {
+    window.clearTimeout(autoDieTimer);
+    autoDieTimer = window.setTimeout(() => {
+      requestAutoDies();
+    }, 120);
+  };
 
   const buildIrisState = () => {
-    const shape = String(irisShape?.value || "Circular");
+    const shape = normalizeProcessSetupIrisShape(String(irisShape?.value || "Circular"));
     const preform = Number(irisPreform?.value || 0);
     const octF2f = Number(irisOct?.value || 0);
     const tigerCut = Number(irisTiger?.value || 0);
-    const selectedIris = Number(irisSelected?.value || 0);
-    const pmSystem = Boolean(irisPm?.checked);
+    const pmSystem = shape === "PANDA - PM"
+      ? true
+      : (shape === "Tiger Cut" || shape === "Octagonal")
+        ? false
+        : Boolean(irisPm?.checked);
 
     let baseArea = 0;
     let adjustedArea = 0;
     let effectiveDiameter = 0;
-    const sourceDiameter = shape === "Octagonal" ? octF2f : preform;
+    let selectedIris = 0;
+    let irisArea = 0;
+    let gapArea = 0;
 
     if (shape === "Octagonal" && octF2f > 0) {
       const a = octF2f / (1 + Math.sqrt(2));
       baseArea = 2 * (1 + Math.sqrt(2)) * Math.pow(a, 2);
       adjustedArea = baseArea;
-    } else if (sourceDiameter > 0) {
-      baseArea = Math.PI * Math.pow(sourceDiameter / 2, 2);
+    } else if (preform > 0) {
+      baseArea = Math.PI * Math.pow(preform / 2, 2);
       adjustedArea = shape === "Tiger Cut" ? baseArea * Math.max(0, 1 - tigerCut / 100) : baseArea;
     }
     if (adjustedArea > 0) {
       effectiveDiameter = 2 * Math.sqrt(adjustedArea / Math.PI);
     }
-    const irisArea = selectedIris > 0 ? Math.PI * Math.pow(selectedIris / 2, 2) : 0;
-    const gapArea = irisArea > 0 ? irisArea - adjustedArea : 0;
+
+    if (adjustedArea > 0) {
+      if (pmSystem) {
+        selectedIris = 37.0;
+      } else {
+        let bestDiameter = 0;
+        let bestError = Number.POSITIVE_INFINITY;
+        PROCESS_SETUP_IRIS_OPTIONS_MM.forEach((diameter) => {
+          const candidateGap = Math.PI * Math.pow(diameter / 2, 2) - adjustedArea;
+          const candidateError = Math.abs(candidateGap - PROCESS_SETUP_IRIS_TARGET_GAP_MM2);
+          if (candidateError < bestError) {
+            bestError = candidateError;
+            bestDiameter = diameter;
+          }
+        });
+        selectedIris = bestDiameter;
+      }
+    }
+
+    irisArea = selectedIris > 0 ? Math.PI * Math.pow(selectedIris / 2, 2) : 0;
+    gapArea = irisArea > 0 ? irisArea - adjustedArea : 0;
 
     return {
       shape,
@@ -13596,9 +16273,11 @@ function bindProcessSetupPage(processData) {
       tigerCut,
       selectedIris,
       pmSystem,
+      targetGap: PROCESS_SETUP_IRIS_TARGET_GAP_MM2,
       baseArea,
       adjustedArea,
       effectiveDiameter,
+      irisArea,
       gapArea,
     };
   };
@@ -13606,13 +16285,29 @@ function bindProcessSetupPage(processData) {
   const renderIrisSummary = () => {
     if (!irisSummary) return;
     const state = buildIrisState();
+    if (irisSelected) {
+      irisSelected.value = state.selectedIris ? state.selectedIris.toFixed(1) : "";
+    }
+    if (irisPm) {
+      irisPm.checked = state.pmSystem;
+      irisPm.disabled = state.shape === "Tiger Cut" || state.shape === "Octagonal" || state.shape === "PANDA - PM";
+    }
+    if (irisTiger) {
+      irisTiger.disabled = state.shape !== "Tiger Cut";
+    }
+    if (irisOct) {
+      irisOct.disabled = state.shape !== "Octagonal";
+    }
     irisSummary.innerHTML = `
       <div class="metric-pill tone-info"><span>Shape</span><strong>${state.shape}</strong></div>
       <div class="metric-pill tone-info"><span>Base area</span><strong>${state.baseArea ? state.baseArea.toFixed(1) : "—"}</strong></div>
       <div class="metric-pill tone-warn"><span>Adjusted</span><strong>${state.adjustedArea ? state.adjustedArea.toFixed(1) : "—"}</strong></div>
       <div class="metric-pill tone-info"><span>Effective Ø</span><strong>${state.effectiveDiameter ? state.effectiveDiameter.toFixed(2) : "—"}</strong></div>
-      <div class="metric-pill tone-${state.gapArea < 0 ? "bad" : "good"}"><span>Gap area</span><strong>${state.selectedIris ? state.gapArea.toFixed(1) : "—"}</strong></div>
+      <div class="metric-pill tone-info"><span>Target gap</span><strong>${state.targetGap.toFixed(0)}</strong></div>
+      <div class="metric-pill tone-info"><span>Iris Ø</span><strong>${state.selectedIris ? state.selectedIris.toFixed(1) : "—"}</strong></div>
+      <div class="metric-pill tone-${state.selectedIris ? (Math.abs(state.gapArea - state.targetGap) <= 10 ? "good" : "warn") : "bad"}"><span>Gap area</span><strong>${state.selectedIris ? state.gapArea.toFixed(1) : "—"}</strong></div>
     `;
+    renderReadiness();
   };
 
   const buildHolderSetpointState = () => {
@@ -13678,6 +16373,7 @@ function bindProcessSetupPage(processData) {
         : `${selectedCsv}${datasetLatestFile ? ` · latest ${datasetLatestFile}` : ""}`;
     const fieldDefs = [
       { key: "entryFiber", label: "Entry fiber", id: "ps-entry-fiber", value: document.getElementById("ps-entry-fiber")?.value || "" },
+      { key: "furnaceTemp", label: "Furnace temperature", id: "ps-furnace-temp", value: document.getElementById("ps-furnace-temp")?.value || "" },
       { key: "drawSpeed", label: "Draw speed", id: "ps-draw-speed", value: document.getElementById("ps-draw-speed")?.value || "" },
       { key: "targetFirst", label: "Target first coating", id: "ps-target-first", value: document.getElementById("ps-target-first")?.value || "" },
       { key: "targetSecond", label: "Target second coating", id: "ps-target-second", value: document.getElementById("ps-target-second")?.value || "" },
@@ -13687,8 +16383,10 @@ function bindProcessSetupPage(processData) {
       { key: "secondaryTemp", label: "Secondary temperature", id: "ps-secondary-temp", value: document.getElementById("ps-secondary-temp")?.value || "" },
       { key: "primaryDie", label: "Primary die", id: "ps-primary-die", value: document.getElementById("ps-primary-die")?.value || "" },
       { key: "secondaryDie", label: "Secondary die", id: "ps-secondary-die", value: document.getElementById("ps-secondary-die")?.value || "" },
-      { key: "selectedIris", label: "Selected iris", id: "ps-iris-selected", value: document.getElementById("ps-iris-selected")?.value || "" },
-      { key: "preformBase", label: irisState.shape === "Octagonal" ? "Octagonal F2F" : "Preform diameter", id: irisState.shape === "Octagonal" ? "ps-iris-oct" : "ps-iris-preform", value: irisState.shape === "Octagonal" ? (document.getElementById("ps-iris-oct")?.value || "") : (document.getElementById("ps-iris-preform")?.value || "") },
+      { key: "selectedIris", label: "Calculated iris", id: "ps-iris-selected", value: irisState.selectedIris ? irisState.selectedIris.toFixed(1) : "" },
+      { key: "preformDiameter", label: "Preform diameter", id: "ps-iris-preform", value: document.getElementById("ps-iris-preform")?.value || "" },
+      { key: "octF2f", label: "Octagonal F2F", id: "ps-iris-oct", value: document.getElementById("ps-iris-oct")?.value || "" },
+      { key: "tigerCut", label: "Tiger cut", id: "ps-iris-tiger", value: document.getElementById("ps-iris-tiger")?.value || "" },
       { key: "pidP", label: "P gain", id: "ps-pid-p", value: document.getElementById("ps-pid-p")?.value || "" },
       { key: "pidI", label: "I gain", id: "ps-pid-i", value: document.getElementById("ps-pid-i")?.value || "" },
       { key: "pidMode", label: "TF mode", id: "ps-pid-mode", value: document.getElementById("ps-pid-mode")?.value || "" },
@@ -13714,7 +16412,7 @@ function bindProcessSetupPage(processData) {
       {
         label: "Coating",
         summary: "Diameters, temperatures, and coating pair",
-        missingItems: resolveMissingItems(["entryFiber", "drawSpeed", "targetFirst", "targetSecond", "primaryCoating", "secondaryCoating", "primaryTemp", "secondaryTemp"]),
+        missingItems: resolveMissingItems(["entryFiber", "furnaceTemp", "drawSpeed", "targetFirst", "targetSecond", "primaryCoating", "secondaryCoating", "primaryTemp", "secondaryTemp"]),
       },
       {
         label: "Dies",
@@ -13724,7 +16422,12 @@ function bindProcessSetupPage(processData) {
       {
         label: "Iris",
         summary: `${irisState.shape} setup with selected iris`,
-        missingItems: resolveMissingItems(["preformBase", "selectedIris"]),
+        missingItems: [
+          ...resolveMissingItems(["preformDiameter"]),
+          ...(irisState.shape === "Octagonal" ? resolveMissingItems(["octF2f"]) : []),
+          ...(irisState.shape === "Tiger Cut" ? resolveMissingItems(["tigerCut"]) : []),
+          ...resolveMissingItems(["selectedIris"]),
+        ],
       },
       {
         label: "PID + TF",
@@ -13875,7 +16578,7 @@ function bindProcessSetupPage(processData) {
     });
   });
 
-  [irisShape, irisPreform, irisOct, irisTiger, irisSelected, irisPm].forEach((element) => {
+  [irisShape, irisPreform, irisOct, irisTiger, irisPm].forEach((element) => {
     element?.addEventListener("input", renderIrisSummary);
     element?.addEventListener("change", renderIrisSummary);
   });
@@ -13887,6 +16590,7 @@ function bindProcessSetupPage(processData) {
     "ps-secondary-die",
     "ps-drum-select",
     "ps-entry-fiber",
+    "ps-furnace-temp",
     "ps-target-first",
     "ps-target-second",
     "ps-primary-temp",
@@ -13896,6 +16600,22 @@ function bindProcessSetupPage(processData) {
     const node = document.getElementById(id);
     node?.addEventListener("input", renderReadiness);
     node?.addEventListener("change", renderReadiness);
+  });
+
+  [
+    dieMode,
+    entryFiber,
+    furnaceTemp,
+    targetFirst,
+    targetSecond,
+    primaryCoating,
+    secondaryCoating,
+    primaryTemp,
+    secondaryTemp,
+    drawSpeed,
+  ].forEach((node) => {
+    node?.addEventListener("input", queueAutoDieRefresh);
+    node?.addEventListener("change", queueAutoDieRefresh);
   });
 
   saveButton?.addEventListener("click", async () => {
@@ -13920,7 +16640,7 @@ function bindProcessSetupPage(processData) {
       selectedCsv: processData.selected_csv || "",
       iris: {
         shape: irisState.shape,
-        preform_diameter_mm: irisState.shape === "Octagonal" ? "" : (irisState.preform || ""),
+        preform_diameter_mm: irisState.preform || "",
         oct_f2f_mm: irisState.shape === "Octagonal" ? (irisState.octF2f || "") : "",
         tiger_cut_pct: irisState.shape === "Tiger Cut" ? (irisState.tigerCut || "") : "",
         pm_system: irisState.pmSystem,
@@ -13933,6 +16653,7 @@ function bindProcessSetupPage(processData) {
       },
       coating: {
         entry_fiber_diameter_um: document.getElementById("ps-entry-fiber")?.value || "",
+        furnace_temp_c: document.getElementById("ps-furnace-temp")?.value || "",
         target_first_coating_diameter_um: document.getElementById("ps-target-first")?.value || "",
         target_second_coating_diameter_um: document.getElementById("ps-target-second")?.value || "",
         primary_coating: document.getElementById("ps-primary-coating")?.value || "",
@@ -13942,6 +16663,10 @@ function bindProcessSetupPage(processData) {
         die_mode: document.getElementById("ps-die-mode")?.value || "Auto",
         primary_die: document.getElementById("ps-primary-die")?.value || "",
         secondary_die: document.getElementById("ps-secondary-die")?.value || "",
+        predicted_first_coating_diameter_um: autoDieState.ready && autoDieState.auto_dies ? autoDieState.auto_dies.predicted_first_um || "" : "",
+        predicted_second_coating_diameter_um: autoDieState.ready && autoDieState.auto_dies ? autoDieState.auto_dies.predicted_second_um || "" : "",
+        ideal_primary_die_um: autoDieState.ready && autoDieState.auto_dies ? autoDieState.auto_dies.ideal_primary_die_um || "" : "",
+        ideal_secondary_die_um: autoDieState.ready && autoDieState.auto_dies ? autoDieState.auto_dies.ideal_secondary_die_um || "" : "",
         draw_speed_m_min: document.getElementById("ps-draw-speed")?.value || "",
       },
       pid: {
@@ -13979,13 +16704,23 @@ function bindProcessSetupPage(processData) {
   });
 
   renderIrisSummary();
+  syncDieModeUi();
+  queueAutoDieRefresh();
   renderReadiness();
 }
 
 function bindConsumablesPage() {
   const page = document.getElementById("consumables-page");
   if (!page) return;
+  if (consumablesLivePollTimer) {
+    window.clearInterval(consumablesLivePollTimer);
+    consumablesLivePollTimer = null;
+  }
+  consumablesLivePollInFlight = false;
   const tempsForm = document.getElementById("consumables-temp-form");
+  const containersForm = document.getElementById("consumables-containers-form");
+  const stockForm = document.getElementById("consumables-stock-form");
+  const coatingsForm = document.getElementById("consumables-coatings-form");
   const diesForm = document.getElementById("consumables-dies-form");
   const refreshTempsButton = document.getElementById("consumables-temp-refresh");
   const tempsSourcePanel = tempsForm?.querySelector(".consumables-temp-source");
@@ -14059,10 +16794,68 @@ function bindConsumablesPage() {
     clearTimeout(tempsSaveTimer);
     await saveTempSetpoints("manual");
   });
+  stockForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const rows = Array.from(stockForm.querySelectorAll(".consumables-stock-row:not(.is-add)")).map((row, index) => ({
+      label: row.querySelector(`input[name="stock_label_${index}"]`)?.value || "",
+      value: row.querySelector(`input[name="stock_value_${index}"]`)?.value || "",
+      min_stock_kg: row.querySelector(`input[name="stock_min_${index}"]`)?.value || "",
+      remove: row.querySelector(`input[name="stock_remove_${index}"]`)?.checked ? "1" : "",
+    }));
+    const custom = {
+      label: stockForm.querySelector('input[name="new_stock_label"]')?.value || "",
+      value: stockForm.querySelector('input[name="new_stock_value"]')?.value || "",
+      min_stock_kg: stockForm.querySelector('input[name="new_stock_min"]')?.value || "",
+    };
+    try {
+      const result = await postJson("/api/consumables/stock-save", { rows, custom });
+      bootstrapData = result.bootstrap || null;
+      await renderRoute();
+    } catch (error) {
+      const host = stockForm.closest(".chart-card") || stockForm;
+      host.insertAdjacentHTML("beforeend", `<div class="micro-panel consumables-stock-message">${escapeHtml(error.message || "Could not save stock values.")}</div>`);
+    }
+  });
+  containersForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const sharedDiameterMm = containersForm.querySelector('input[name="container_shared_diameter"]')?.value || "";
+    const rows = Array.from(containersForm.querySelectorAll(".consumables-container-row")).map((row, index) => ({
+      label: row.querySelector(`input[name="container_label_${index}"]`)?.value || "",
+      type: row.querySelector(`input[name="container_type_${index}"]`)?.value || "",
+      sensor_column: row.querySelector(`select[name="container_sensor_${index}"]`)?.value || "",
+    }));
+    try {
+      const result = await postJson("/api/consumables/containers-save", { rows, shared_diameter_mm: sharedDiameterMm });
+      bootstrapData = result.bootstrap || null;
+      await renderRoute();
+    } catch (error) {
+      const host = containersForm.closest(".chart-card") || containersForm;
+      host.insertAdjacentHTML("beforeend", `<div class="micro-panel consumables-stock-message">${escapeHtml(error.message || "Could not save live fill setup.")}</div>`);
+    }
+  });
+  coatingsForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const rows = Array.from(coatingsForm.querySelectorAll(".consumables-coating-edit-row")).map((row, index) => ({
+      label: row.querySelector(`input[name="coating_label_${index}"]`)?.value || "",
+      description: row.querySelector(`textarea[name="coating_description_${index}"]`)?.value || "",
+      density: row.querySelector(`input[name="coating_density_${index}"]`)?.value || "",
+      viscosity: row.querySelector(`input[name="coating_viscosity_${index}"]`)?.value || "",
+      refractive_index: row.querySelector(`input[name="coating_ri_${index}"]`)?.value || "",
+    }));
+    try {
+      const result = await postJson("/api/consumables/coatings-save", { rows });
+      bootstrapData = result.bootstrap || null;
+      await renderRoute();
+    } catch (error) {
+      const host = coatingsForm.closest(".fold-body") || coatingsForm;
+      host.insertAdjacentHTML("beforeend", `<div class="micro-panel consumables-stock-message">${escapeHtml(error.message || "Could not save coating guide.")}</div>`);
+    }
+  });
   diesForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const stations = Array.from(diesForm.querySelectorAll(".consumables-die-row")).map((row, index) => ({
-      station: row.querySelector('input[name="station"]')?.value || "",
+      original_station: row.querySelector(`input[name="original_station_${index}"]`)?.value || "",
+      station: row.querySelector(`input[name="station_name_${index}"]`)?.value || "",
       entry_die_um: row.querySelector(`input[name="entry_die_um_${index}"]`)?.value || "",
       primary_die_um: row.querySelector(`input[name="primary_die_um_${index}"]`)?.value || "",
     }));
@@ -14075,6 +16868,46 @@ function bindConsumablesPage() {
       host.insertAdjacentHTML("afterbegin", `<div class="micro-panel">${error.message}</div>`);
     }
   });
+  const pageRoot = document.getElementById("page-root");
+  const refreshConsumablesLive = async () => {
+    if (getCurrentRoute() !== "/consumables") {
+      if (consumablesLivePollTimer) {
+        window.clearInterval(consumablesLivePollTimer);
+        consumablesLivePollTimer = null;
+      }
+      consumablesLivePollInFlight = false;
+      return;
+    }
+    if (!pageRoot || consumablesLivePollInFlight) return;
+    const activeElement = document.activeElement;
+    if (activeElement && page.contains(activeElement) && activeElement.closest("form")) {
+      return;
+    }
+    consumablesLivePollInFlight = true;
+    try {
+      const openFoldTitles = new Set(
+        Array.from(page.querySelectorAll("details.fold-section[open] .fold-summary-copy span"))
+          .map((node) => node.textContent.trim())
+          .filter(Boolean),
+      );
+      const freshData = await getJson("/api/consumables");
+      bootstrapData = { ...(bootstrapData || {}), consumables: freshData };
+      pageRoot.innerHTML = await renderConsumablesPage(freshData);
+      bindConsumablesPage();
+      bindFoldSections(pageRoot);
+      Array.from(pageRoot.querySelectorAll("details.fold-section .fold-summary-copy span")).forEach((node) => {
+        const title = node.textContent.trim();
+        if (!title || !openFoldTitles.has(title)) return;
+        const details = node.closest("details.fold-section");
+        if (details instanceof HTMLDetailsElement) details.open = true;
+      });
+    } catch (error) {
+      console.error(error);
+    } finally {
+      consumablesLivePollInFlight = false;
+    }
+  };
+  consumablesLivePollTimer = window.setInterval(refreshConsumablesLive, CONSUMABLES_LIVE_POLL_INTERVAL_MS);
 }
 
 function bindReportCenterPage(reportData) {
@@ -14192,6 +17025,8 @@ function bindSqlLabPage(sqlData) {
   const runDraftRoot = document.getElementById("sql-run-draft-root");
   const runSummaryRoot = document.getElementById("sql-run-summary-root");
   const interpretationRoot = document.getElementById("sql-interpretation-root");
+  const exportResultsButton = document.getElementById("sql-export-results-btn");
+  const exportStatusRoot = document.getElementById("sql-export-status");
   const analysisSeriesRoot = document.getElementById("sql-analysis-series-root");
   const analysisMathRoot = document.getElementById("sql-analysis-math-root");
   const analysisHoverRoot = document.getElementById("sql-analysis-hover-root");
@@ -14200,17 +17035,20 @@ function bindSqlLabPage(sqlData) {
   const analysisTooltip = document.getElementById("sql-analysis-tooltip");
   const analysisHero = document.getElementById("sql-analysis-hero");
   const analysisReducer = document.getElementById("sql-analysis-reducer");
+  const restoreHiddenPointsButton = document.getElementById("sql-plot-restore-hidden");
   const analysisSourceButtons = Array.from(page.querySelectorAll("[data-sql-analysis-source]"));
-  const analysisResourceRoot = document.getElementById("sql-analysis-resource-root");
+  const analysisSearchInput = document.getElementById("sql-analysis-search");
+  const analysisSearchNote = document.getElementById("sql-analysis-search-note");
   const mathSourceA = document.getElementById("sql-math-source-a");
   const mathSourceB = document.getElementById("sql-math-source-b");
   const mathOperation = document.getElementById("sql-math-operation");
-  const mathWindow = document.getElementById("sql-math-window");
+  const mathExpression = document.getElementById("sql-math-expression");
   const mathSummaryRoot = document.getElementById("sql-math-summary-root");
   const mathHoverRoot = document.getElementById("sql-math-hover-root");
   const mathCanvas = document.getElementById("sql-math-canvas");
   const mathTooltip = document.getElementById("sql-math-tooltip");
   const mathPresetButtons = Array.from(page.querySelectorAll("[data-sql-math-preset]"));
+  const mathExpressionExamples = Array.from(page.querySelectorAll("[data-sql-math-expression-example]"));
   const mathRecipesRoot = document.getElementById("sql-math-recipes-root");
   const mathSaveRecipeButton = document.getElementById("sql-math-save-recipe");
   const mathClearRecipesButton = document.getElementById("sql-math-clear-recipes");
@@ -14231,27 +17069,55 @@ function bindSqlLabPage(sqlData) {
   let currentConditions = [];
   let selectedParameterNames = [];
   let lastFilterResult = null;
+  let lastFilterPayload = null;
   let activeAnalysisParams = [];
   let hiddenAnalysisParams = [];
   let currentAnalysisTargets = [];
   let selectedAnalysisTarget = null;
+  let lastAnalysisCanvasModel = null;
+  let lastAnalysisCanvasOverlays = null;
+  let analysisCanvasFrame = 0;
   let currentMathTargets = [];
   let analysisScopeCacheKey = "";
   let analysisScopeData = { records: [], draw_count: 0, row_count: 0 };
   let analysisResourceMode = "filter";
+  let analysisPlotMode = "filter";
   let analysisReduceMode = "avg";
   let detailExpanded = false;
   let detailTab = "overview";
   let hoveredAnalysisKey = "";
   let hoveredMathKey = "";
+  let hoveredAnalysisTarget = null;
+  let hoveredMathTarget = null;
+  let hiddenAnalysisPointKeys = [];
   let mathConfig = {
     sourceA: "",
     sourceB: "",
     operation: "identity",
-    window: 3,
+    expression: "A",
+    window: SQL_MATH_FIXED_WINDOW,
     reducer: "avg",
   };
   let savedMathRecipes = [];
+
+  const redrawSqlAnalysisCanvas = () => {
+    if (!analysisCanvas || !lastAnalysisCanvasModel) return;
+    currentAnalysisTargets = drawSqlAnalysisCanvas(
+      lastAnalysisCanvasModel,
+      analysisCanvas,
+      lastAnalysisCanvasOverlays || {},
+      selectedAnalysisTarget,
+    );
+  };
+
+  const scheduleSqlAnalysisCanvasRedraw = () => {
+    if (!analysisCanvas) return;
+    if (analysisCanvasFrame) window.cancelAnimationFrame(analysisCanvasFrame);
+    analysisCanvasFrame = window.requestAnimationFrame(() => {
+      analysisCanvasFrame = 0;
+      redrawSqlAnalysisCanvas();
+    });
+  };
 
   const setStep = (step) => {
     currentStep = String(step);
@@ -14259,7 +17125,68 @@ function bindSqlLabPage(sqlData) {
     stepPanels.forEach((panel) => panel.classList.toggle("is-active", panel.dataset.sqlStepPanel === currentStep));
   };
 
-  const filteredParameterNames = () => {
+  const findFoldSectionByTitle = (title) => Array.from(page.querySelectorAll(".fold-section")).find((section) => {
+    const label = section.querySelector(".fold-summary-copy span");
+    return String(label?.textContent || "").trim() === String(title || "").trim();
+  });
+
+  const revealSqlResultsStep = ({
+    scrollTarget = null,
+    openAnalysisStudio = false,
+    openMatchedDraws = false,
+  } = {}) => {
+    setStep("3");
+    if (openAnalysisStudio) {
+      const analysisSection = findFoldSectionByTitle("Analysis studio");
+      if (analysisSection) analysisSection.open = true;
+    }
+    const drawsSection = findFoldSectionByTitle("Matched draws");
+    if (drawsSection) {
+      drawsSection.open = Boolean(openMatchedDraws);
+    }
+    bindFoldSections(page);
+    if (scrollTarget) {
+      window.requestAnimationFrame(() => {
+        scrollTarget.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    }
+  };
+
+  const buildSqlFilterPayload = () => ({
+    dataset: datasetSelect?.value || "__ALL__",
+    conditions: currentConditions.map((item) => ({
+      params: item.params,
+      op: item.op,
+      v1: item.v1,
+      v2: item.v2,
+      negate: item.negate,
+      joiner: item.joiner === "BASE" ? "AND" : item.joiner,
+      groupLogic: item.groupLogic,
+    })),
+    timeEnabled: Boolean(timeEnabled?.checked),
+    timeFrom: String(timeFrom?.value || ""),
+    timeTo: String(timeTo?.value || ""),
+    includeDraws: Boolean(includeDraws?.checked),
+    includeMaintenance: Boolean(includeMaintenance?.checked),
+    includeFaults: Boolean(includeFaults?.checked),
+    eventScope: String(eventScope?.value || "Only within matched draws window"),
+    maintenanceText: String(maintenanceText?.value || ""),
+    maintenanceComponent: String(maintenanceComponent?.value || ""),
+    faultText: String(faultText?.value || ""),
+    faultComponent: String(faultComponent?.value || ""),
+    faultSeverity: String(faultSeverity?.value || ""),
+  });
+
+  const renderSqlExportStatus = (payload = null) => {
+    if (!exportStatusRoot) return;
+    if (!payload) {
+      exportStatusRoot.innerHTML = `Run a filter, then export the matched draw set and condition parameters as a CSV.`;
+      return;
+    }
+    exportStatusRoot.innerHTML = `<span>${escapeHtml(payload.message || "Matched results CSV ready.")}</span>`;
+  };
+
+  const filteredParameterNames = ({ ignoreMetricMode = false } = {}) => {
     if (!datasetDetails) return [];
     const needle = String(filterInput?.value || "").trim().toLowerCase();
     const family = String(familyFilter?.value || "All");
@@ -14273,13 +17200,24 @@ function bindSqlLabPage(sqlData) {
         if (family === "Zones") return info.includes("zone ");
         if (family === "Order") return info.startsWith("order__");
         if (family === "Process") return info.startsWith("process__");
-        if (family === "Winder + T&M") return info.includes("t&m") || info.includes("good zone") || info.includes("cut/save") || info.includes("fiber length") || info.includes("drum |");
+        if (family === "Winder + T&M") {
+          return (
+            info.includes("t&m")
+            || info.includes("good zone")
+            || info.includes("cut/save")
+            || info.includes("fiber length")
+            || info.includes("fibre length")
+            || info.includes("drum |")
+          );
+        }
         return !info.startsWith("order__") && !info.startsWith("process__") && !info.includes("zone ");
       });
     }
-    if (onlyAvg?.checked) list = list.filter((item) => item.toLowerCase().includes("avg"));
-    if (onlyMin?.checked) list = list.filter((item) => item.toLowerCase().includes("min"));
-    if (onlyMax?.checked) list = list.filter((item) => item.toLowerCase().includes("max"));
+    if (!ignoreMetricMode) {
+      if (onlyAvg?.checked) list = list.filter((item) => item.toLowerCase().includes("avg"));
+      if (onlyMin?.checked) list = list.filter((item) => item.toLowerCase().includes("min"));
+      if (onlyMax?.checked) list = list.filter((item) => item.toLowerCase().includes("max"));
+    }
     return list.slice(0, 500);
   };
 
@@ -14301,6 +17239,18 @@ function bindSqlLabPage(sqlData) {
         `
         : `Choose one or more parameters to build a group.`;
     }
+  };
+
+  const currentFilteredParameterNames = () => {
+    const strict = filteredParameterNames();
+    const metricModeActive = Boolean(onlyAvg?.checked || onlyMin?.checked || onlyMax?.checked);
+    const relaxed = metricModeActive && !strict.length ? filteredParameterNames({ ignoreMetricMode: true }) : [];
+    return {
+      strict,
+      relaxed,
+      metricModeActive,
+      display: strict.length ? strict : relaxed,
+    };
   };
 
   const toggleSelectedParameter = (parameterName) => {
@@ -14353,10 +17303,14 @@ function bindSqlLabPage(sqlData) {
         });
       });
     }
-    const filtered = filteredParameterNames();
+    const parameterMatches = currentFilteredParameterNames();
+    const filtered = parameterMatches.strict;
+    const displayFiltered = parameterMatches.display;
     if (matchScroll) {
-      matchScroll.innerHTML = filtered.length
-        ? filtered
+      matchScroll.innerHTML = displayFiltered.length
+        ? `
+          ${filtered.length ? "" : `<div class="sql-match-empty">No parameters matched the current metric mode, so the base matches are shown below.</div>`}
+          ${displayFiltered
           .map((item) => `
             <button
               class="sql-match-chip ${selectedParameterNames.includes(item) ? "is-selected" : ""}"
@@ -14364,7 +17318,8 @@ function bindSqlLabPage(sqlData) {
               data-sql-match-param="${escapeHtml(item)}"
             >${escapeHtml(item)}</button>
           `)
-          .join("")
+          .join("")}
+        `
         : `<div class="sql-match-empty">No parameters match the current search and family filter.</div>`;
       Array.from(matchScroll.querySelectorAll("[data-sql-match-param]")).forEach((button) => {
         button.addEventListener("click", () => toggleSelectedParameter(button.dataset.sqlMatchParam || ""));
@@ -14494,34 +17449,36 @@ function bindSqlLabPage(sqlData) {
     }
   };
 
-  const analysisSourceRows = () => {
-    if (analysisResourceMode === "draws") {
+  function sqlStrictNumericValue(raw) {
+    const text = String(raw ?? "").trim();
+    if (!text) return null;
+    const normalized = text.replace(/,/g, "");
+    if (!/^[-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?$/i.test(normalized)) {
+      return null;
+    }
+    const numeric = Number(normalized);
+    return Number.isFinite(numeric) ? numeric : null;
+  }
+
+  const analysisSourceRows = (sourceMode = analysisResourceMode) => {
+    if (sourceMode === "draws") {
       return analysisScopeData.records || [];
     }
     return (lastFilterResult?.matched_values || []).map((item) => ({
       parameter_name: String(item.parameter_name || ""),
       value: String(item.value || ""),
       units: String(item.units || ""),
-      value_num: Number.isFinite(Number(item.value)) ? Number(item.value) : null,
+      value_num: sqlStrictNumericValue(item.value),
       _draw: String(item._draw || ""),
       event_ts: String(item.event_ts || ""),
       filename: String(item.filename || ""),
     }));
   };
 
-  const renderAnalysisResourceState = () => {
+  const syncAnalysisSourceButtons = () => {
     analysisSourceButtons.forEach((button) => {
       button.classList.toggle("is-active", button.dataset.sqlAnalysisSource === analysisResourceMode);
     });
-    if (!analysisResourceRoot) return;
-    if (analysisResourceMode === "draws") {
-      analysisResourceRoot.innerHTML = analysisScopeData.row_count
-        ? `Plot and math are reading <strong>${analysisScopeData.row_count}</strong> rows across <strong>${analysisScopeData.draw_count}</strong> matched draws.`
-        : `No matched-draw resource has been loaded yet. Run a filter first.`;
-      return;
-    }
-    const matchedValues = lastFilterResult?.summary?.matched_values || 0;
-    analysisResourceRoot.innerHTML = `Plot and math are reading only the <strong>${matchedValues}</strong> values that passed the current filter.`;
   };
 
   const ensureAnalysisScopeData = async () => {
@@ -14530,16 +17487,13 @@ function bindSqlLabPage(sqlData) {
     if (!filenames.length) {
       analysisScopeCacheKey = "";
       analysisScopeData = { records: [], draw_count: 0, row_count: 0 };
-      renderAnalysisResourceState();
       return;
     }
     if (key === analysisScopeCacheKey && analysisScopeData.records.length) {
-      renderAnalysisResourceState();
       return;
     }
     analysisScopeData = await postJson("/api/sql-lab/analysis-scope", { filenames });
     analysisScopeCacheKey = key;
-    renderAnalysisResourceState();
   };
 
   const renderAnalysisDetail = async (target) => {
@@ -14618,6 +17572,8 @@ function bindSqlLabPage(sqlData) {
         ["events", "Events"],
         ["math", "Math"],
       ].map(([key, label]) => `<button class="report-mode-btn sql-detail-tab ${detailTab === key ? "is-active" : ""}" type="button" data-sql-detail-tab="${key}">${label}</button>`).join("");
+      const selectedPointKey = sqlAnalysisPointKey(target.label, target.draw, target.ts);
+      const pointHidden = hiddenAnalysisPointKeys.includes(selectedPointKey);
       let bodyMarkup = "";
       if (detailTab === "csv") {
         bodyMarkup = `
@@ -14664,7 +17620,7 @@ function bindSqlLabPage(sqlData) {
         bodyMarkup = `
           <div class="metric-row compact">
             <div class="metric-pill tone-info"><span>Family</span><strong>${target.label}</strong></div>
-            <div class="metric-pill tone-good"><span>Value</span><strong>${Number(target.value).toFixed(2)}</strong></div>
+            <div class="metric-pill tone-good"><span>Value</span><strong>${sqlFormatAnalysisValue(target)}</strong></div>
             <div class="metric-pill tone-info"><span>Time</span><strong>${target.ts || "Unknown"}</strong></div>
           <div class="metric-pill tone-warn"><span>File</span><strong>${filename}</strong></div>
         </div>
@@ -14676,7 +17632,8 @@ function bindSqlLabPage(sqlData) {
                 <div class="micro-row"><span>Filename</span><strong>${filename}</strong></div>
                 <div class="micro-row"><span>Rows in preview</span><strong>${detail.preview_rows?.length || 0}</strong></div>
                 <div class="micro-row"><span>Reducer</span><strong>${analysisReduceMode}</strong></div>
-                <div class="micro-row"><span>Source mode</span><strong>${analysisResourceMode}</strong></div>
+                <div class="micro-row"><span>Plot source</span><strong>${analysisPlotMode}</strong></div>
+                <div class="micro-row"><span>Browser source</span><strong>${analysisResourceMode}</strong></div>
               </div>
             </div>
             <div class="sql-detail-group sql-detail-group-rich">
@@ -14699,6 +17656,9 @@ function bindSqlLabPage(sqlData) {
           </div>
           <div class="sql-detail-tabs">${tabButtons}</div>
           <div class="order-builder-actions">
+            ${detailTab === "overview"
+              ? `<button class="action-btn action-secondary" type="button" id="sql-detail-hide-point">${pointHidden ? "Point hidden in current visual" : "Hide point from current visual"}</button>`
+              : ``}
             <button class="action-btn action-secondary" type="button" id="sql-detail-clear">Clear selection</button>
           </div>
           <div class="sql-detail-body">${bodyMarkup}</div>
@@ -14710,8 +17670,18 @@ function bindSqlLabPage(sqlData) {
           await renderAnalysisDetail(selectedAnalysisTarget);
         });
       });
+      const hidePointBtn = document.getElementById("sql-detail-hide-point");
       const toggleBtn = document.getElementById("sql-detail-toggle");
       const clearBtn = document.getElementById("sql-detail-clear");
+      hidePointBtn?.addEventListener("click", async () => {
+        if (!pointHidden) {
+          hiddenAnalysisPointKeys = dedupeStrings([...hiddenAnalysisPointKeys, selectedPointKey]);
+        }
+        selectedAnalysisTarget = null;
+        detailExpanded = false;
+        renderSqlAnalysis();
+        await renderAnalysisDetail(null);
+      });
       toggleBtn?.addEventListener("click", async () => {
         detailExpanded = !detailExpanded;
         await renderAnalysisDetail(selectedAnalysisTarget);
@@ -14727,45 +17697,141 @@ function bindSqlLabPage(sqlData) {
     }
   };
 
-  const sqlAnalysisSeries = ({ labelsOverride = null, limitDefault = true } = {}) => {
-    const values = analysisSourceRows();
-    if (!values.length) return [];
+  const sqlNumericValue = (item) => sqlStrictNumericValue(item?.value);
+
+  const sqlCleanTextValue = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+
+  const sqlParameterLooksCategorical = (parameterName) => {
+    const lower = String(parameterName || "").trim().toLowerCase();
+    if (!lower) return false;
+    if (/(project|geometry|operator|priority|shape|main coating|secondary coating|preform number|mode|title|purpose|methods|observations|results)/.test(lower)) {
+      return true;
+    }
+    if (/(diameter|tolerance|temperature|tension|speed|length|count|f2f|cut|degc|viscosity|density|\bri\b|gain|increment|hours|kg|percent|%|avg|min|max)/.test(lower)) {
+      return false;
+    }
+    return false;
+  };
+
+  const sqlFormatAnalysisValue = (target) => {
+    const raw = target?.displayValue ?? target?.value;
+    const numeric = Number(raw);
+    if (!target?.isText && Number.isFinite(numeric)) {
+      return Math.abs(numeric) >= 1000 ? numeric.toFixed(0) : numeric.toFixed(2);
+    }
+    return String(raw || "—");
+  };
+
+  const sqlCategoricalValue = (values) => {
+    const counts = new Map();
+    values.forEach((value) => {
+      counts.set(value, (counts.get(value) || 0) + 1);
+    });
+    return Array.from(counts.entries())
+      .sort((a, b) => b[1] - a[1] || values.indexOf(a[0]) - values.indexOf(b[0]))[0]?.[0] || values[0] || "";
+  };
+
+  const buildSqlAnalysisModel = ({
+    labelsOverride = null,
+    limitDefault = true,
+    sourceMode = analysisPlotMode,
+    applyActiveSelection = true,
+    applyHiddenFilter = true,
+  } = {}) => {
+    const values = analysisSourceRows(sourceMode);
+    if (!values.length) {
+      return { labelsMeta: [], numericSeries: [], textSeries: [] };
+    }
     const grouped = new Map();
     values.forEach((item) => {
-      const numeric = item.value_num != null ? Number(item.value_num) : Number(item.value);
-      if (!Number.isFinite(numeric)) return;
       const label = sqlAnalysisGroupLabel(item.parameter_name);
       if (!label) return;
-      const draw = String(item._draw || "");
-      if (!grouped.has(label)) grouped.set(label, new Map());
-      const byDraw = grouped.get(label);
-      if (!byDraw.has(draw)) byDraw.set(draw, []);
-      byDraw.get(draw).push({ draw, value: numeric, ts: item.event_ts || "" });
+      if (!grouped.has(label)) grouped.set(label, []);
+      grouped.get(label).push(item);
     });
     let labels = Array.from(grouped.keys());
     if (Array.isArray(labelsOverride)) {
       labels = labels.filter((label) => labelsOverride.includes(label));
-    } else if (activeAnalysisParams.length) {
+    } else if (applyActiveSelection && activeAnalysisParams.length) {
       labels = labels.filter((label) => activeAnalysisParams.includes(label));
     }
-    labels = labels.filter((label) => !hiddenAnalysisParams.includes(label));
-    if (!labelsOverride && !activeAnalysisParams.length && limitDefault) {
+    if (applyHiddenFilter) {
+      labels = labels.filter((label) => !hiddenAnalysisParams.includes(label));
+    }
+    if (!labelsOverride && !(applyActiveSelection && activeAnalysisParams.length) && limitDefault) {
       labels = labels.slice(0, 4);
     }
-    return labels.map((label) => ({
-      label,
-      points: Array.from((grouped.get(label) || new Map()).entries())
-        .map(([draw, rows]) => {
-          const aggregate = aggregateValues(rows.map((row) => row.value), analysisReduceMode);
-          return {
+    const labelsMeta = [];
+    const numericSeries = [];
+    const textSeries = [];
+    labels.forEach((label) => {
+      const rows = grouped.get(label) || [];
+      const parameterLooksCategorical = sqlParameterLooksCategorical(label);
+      const byDraw = new Map();
+      rows.forEach((item) => {
+        const draw = String(item._draw || item.filename || item.event_ts || "").trim();
+        if (!draw) return;
+        if (!byDraw.has(draw)) byDraw.set(draw, []);
+        byDraw.get(draw).push(item);
+      });
+      const numericPoints = [];
+      const textPoints = [];
+      Array.from(byDraw.entries()).forEach(([draw, drawRows]) => {
+        const ts = String(drawRows.find((row) => String(row.event_ts || "").trim())?.event_ts || "");
+        const filename = String(drawRows.find((row) => String(row.filename || "").trim())?.filename || "");
+        const textValues = drawRows.map((row) => sqlCleanTextValue(row.value)).filter(Boolean);
+        const hasCategoricalText = textValues.some((value) => !Number.isFinite(Number(value)));
+      const numericValues = drawRows.map(sqlNumericValue).filter((value) => Number.isFinite(value));
+      if (!parameterLooksCategorical && !hasCategoricalText && numericValues.length) {
+          const pointKey = sqlAnalysisPointKey(label, draw, ts);
+          if (hiddenAnalysisPointKeys.includes(pointKey)) return;
+          numericPoints.push({
             draw,
-            ts: rows[0]?.ts || "",
-            value: aggregate,
-            filename: rows[0]?.filename || "",
-          };
-        })
-        .sort((a, b) => String(a.ts).localeCompare(String(b.ts))),
-    })).filter((item) => item.points.length >= 1);
+            ts,
+            value: aggregateValues(numericValues, analysisReduceMode),
+            filename,
+          });
+          return;
+        }
+        if (!textValues.length) {
+          if (!parameterLooksCategorical) return;
+          const pointKey = sqlAnalysisPointKey(label, draw, ts);
+          if (hiddenAnalysisPointKeys.includes(pointKey)) return;
+          textPoints.push({
+            draw,
+            ts,
+            value: "Unspecified",
+            displayValue: "Unspecified",
+            filename,
+          });
+          return;
+        }
+        const displayValue = sqlCategoricalValue(textValues);
+        const pointKey = sqlAnalysisPointKey(label, draw, ts);
+        if (hiddenAnalysisPointKeys.includes(pointKey)) return;
+        textPoints.push({
+          draw,
+          ts,
+          value: displayValue,
+          displayValue,
+          filename,
+        });
+      });
+      numericPoints.sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
+      textPoints.sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
+      if (numericPoints.length) {
+        labelsMeta.push({ label, kind: "numeric", count: numericPoints.length });
+        numericSeries.push({ label, points: numericPoints });
+      } else if (textPoints.length) {
+        labelsMeta.push({ label, kind: "text", count: textPoints.length });
+        textSeries.push({
+          label,
+          points: textPoints,
+          categories: dedupeStrings(textPoints.map((point) => point.displayValue || point.value)),
+        });
+      }
+    });
+    return { labelsMeta, numericSeries, textSeries };
   };
 
   const renderSqlMathLab = (allSeries, selectedTargetForMath = selectedAnalysisTarget) => {
@@ -14786,17 +17852,24 @@ function bindSqlLabPage(sqlData) {
     }
     mathConfig.reducer = analysisReduceMode;
     if (mathOperation) mathOperation.value = mathConfig.operation;
-    if (mathWindow) mathWindow.value = String(mathConfig.window);
+    if (mathExpression) mathExpression.value = mathConfig.expression || "A";
 
+    const currentMathPreview = buildSqlMathSeries(allSeries, {
+      ...mathConfig,
+      hiddenPointKeys: hiddenAnalysisPointKeys,
+    });
     const recipeConfigs = [
       { ...mathConfig, recipeKey: "__current__", recipeName: "Current recipe" },
       ...savedMathRecipes,
     ];
     const mathSeriesList = recipeConfigs
       .map((config, index) => ({
-        ...buildSqlMathSeries(allSeries, config),
+        ...buildSqlMathSeries(allSeries, {
+          ...config,
+          hiddenPointKeys: hiddenAnalysisPointKeys,
+        }),
         recipeKey: config.recipeKey || `saved-${index}`,
-        recipeName: config.recipeName || sqlMathOperationLabel(config.operation),
+        recipeName: config.recipeName || sqlMathSeriesLabel(config.operation, config.expression),
       }))
       .filter((item) => item.points.length);
     currentMathTargets = drawSqlMathCanvas(mathSeriesList, mathCanvas, {
@@ -14816,7 +17889,7 @@ function bindSqlLabPage(sqlData) {
               <button class="sql-filter-ribbon-chip sql-condition-tone-violet" type="button" data-sql-math-recipe="${recipe.recipeKey}">
                 <span>${recipe.recipeName}</span>
                 <strong>${recipe.sourceA}${recipe.sourceB ? ` · ${recipe.sourceB}` : ""}</strong>
-                <em>${sqlMathOperationLabel(recipe.operation)} · ${recipe.reducer || "avg"}</em>
+                <em>${recipe.operation === "custom_ab" ? `${escapeHtml(recipe.expression || "A")} · ${recipe.reducer || "avg"}` : `${sqlMathOperationLabel(recipe.operation)} · ${recipe.reducer || "avg"}`}</em>
               </button>
               <button class="parts-filter-chip" type="button" data-sql-math-remove="${recipe.recipeKey}">Remove</button>
             `).join("")}
@@ -14827,7 +17900,11 @@ function bindSqlLabPage(sqlData) {
         button.addEventListener("click", () => {
           const recipe = savedMathRecipes.find((item) => item.recipeKey === button.dataset.sqlMathRecipe);
           if (!recipe) return;
-          mathConfig = { ...recipe };
+          mathConfig = {
+            ...recipe,
+            expression: String(recipe.expression || "A").trim() || "A",
+            window: SQL_MATH_FIXED_WINDOW,
+          };
           hoveredMathKey = "";
           renderSqlAnalysis();
         });
@@ -14844,7 +17921,7 @@ function bindSqlLabPage(sqlData) {
       if (!mathSeriesList.length) {
         mathSummaryRoot.innerHTML = `<div class="micro-panel">Pick source traces from the grouped analysis to generate a derived math curve.</div>`;
       } else {
-        mathSummaryRoot.innerHTML = mathSeriesList.slice(0, 4).map((mathSeries, index) => {
+        mathSummaryRoot.innerHTML = mathSeriesList.slice(0, 8).map((mathSeries, index) => {
           const values = mathSeries.points.map((item) => item.value);
           const latest = values.at(-1);
           const min = Math.min(...values);
@@ -14863,51 +17940,116 @@ function bindSqlLabPage(sqlData) {
     }
     if (mathHoverRoot && !hoveredMathKey) {
       const leadMath = mathSeriesList[0];
-      mathHoverRoot.innerHTML = leadMath
+      mathHoverRoot.innerHTML = currentMathPreview?.error
+        ? `<strong>Formula issue</strong> · ${escapeHtml(currentMathPreview.error)} · Try examples like <code>np.sqrt(np.abs(A-B))</code> or <code>np.power(A,2)</code>.`
+        : leadMath
         ? `<strong>${leadMath.label}</strong> · ${leadMath.sourceA}${leadMath.sourceB ? ` with ${leadMath.sourceB}` : ""} · ${leadMath.points.length} aligned draw points${mathSeriesList.length > 1 ? ` · +${mathSeriesList.length - 1} more recipes live` : ""}`
         : `Build a derived trace to compare families, detect drift, and inspect the same draw through a math lens.`;
     }
   };
 
   const renderSqlAnalysis = () => {
-    const seriesList = sqlAnalysisSeries();
-    const allSeries = sqlAnalysisSeries({ limitDefault: false });
+    syncAnalysisSourceButtons();
+    if (restoreHiddenPointsButton) {
+      restoreHiddenPointsButton.disabled = !hiddenAnalysisPointKeys.length;
+      restoreHiddenPointsButton.textContent = hiddenAnalysisPointKeys.length
+        ? `Restore hidden outliers (${hiddenAnalysisPointKeys.length})`
+        : "Restore hidden outliers";
+    }
+    const analysisModel = buildSqlAnalysisModel({ sourceMode: analysisPlotMode });
+    const fullPlotModel = buildSqlAnalysisModel({ limitDefault: false, sourceMode: analysisPlotMode });
+    const browserAnalysisModel = buildSqlAnalysisModel({
+      limitDefault: false,
+      sourceMode: analysisResourceMode,
+      applyActiveSelection: false,
+      applyHiddenFilter: false,
+    });
+    const seriesList = analysisModel.numericSeries;
+    const allSeries = fullPlotModel.numericSeries;
     if (analysisSeriesRoot) {
-      const allLabels = allSeries.map((item) => item.label).slice(0, 12);
-      analysisSeriesRoot.innerHTML = allLabels.length
-        ? allLabels.map((label) => {
-          const series = allSeries.find((item) => item.label === label);
-          const isActive = activeAnalysisParams.includes(label) || (!activeAnalysisParams.length && seriesList.some((s) => s.label === label));
+      const allLabels = browserAnalysisModel.labelsMeta;
+      const plottedLabels = new Set(
+        activeAnalysisParams.length
+          ? activeAnalysisParams
+          : fullPlotModel.labelsMeta.map((item) => item.label),
+      );
+      const analysisQuery = String(analysisSearchInput?.value || "").trim().toLowerCase();
+      const searchRequired = analysisResourceMode === "draws" && allLabels.length > 24 && !analysisQuery;
+      let visibleLabels = searchRequired
+        ? []
+        : allLabels.filter((meta) => {
+          if (!analysisQuery) return true;
+          const haystack = `${meta.label} ${meta.kind || ""}`.toLowerCase();
+          return haystack.includes(analysisQuery);
+        });
+      if (!searchRequired && analysisResourceMode === "draws" && plottedLabels.size) {
+        const pinnedLabels = allLabels.filter((meta) => plottedLabels.has(meta.label));
+        const seenLabels = new Set();
+        visibleLabels = [...pinnedLabels, ...visibleLabels].filter((meta) => {
+          if (seenLabels.has(meta.label)) return false;
+          seenLabels.add(meta.label);
+          return true;
+        });
+      }
+      if (analysisSearchNote) {
+        analysisSearchNote.innerHTML = searchRequired
+          ? `<span class="sql-analysis-note-chip">${allLabels.length} params</span><span>Type to browse matched-draw traces.</span>`
+          : visibleLabels.length
+            ? `
+              <span class="sql-analysis-note-chip">${visibleLabels.length} / ${allLabels.length}</span>
+              <span>matched parameters${analysisQuery ? ` for "${escapeHtml(analysisQuery)}"` : " ready to add"}</span>
+              ${hiddenAnalysisPointKeys.length ? `<span class="sql-analysis-note-chip">Hidden points ${hiddenAnalysisPointKeys.length}</span>` : ``}
+            `
+            : `<span class="sql-analysis-note-chip is-empty">0 / ${allLabels.length}</span><span>No grouped parameters match "${escapeHtml(analysisQuery)}".</span>${hiddenAnalysisPointKeys.length ? `<span class="sql-analysis-note-chip">Hidden points ${hiddenAnalysisPointKeys.length}</span>` : ``}`;
+      }
+      analysisSeriesRoot.innerHTML = searchRequired
+        ? `<div class="micro-panel sql-analysis-search-empty">Search the matched-draw parameter board to browse grouped traces. The current plot can still stay active while the list stays collapsed.</div>`
+        : visibleLabels.length
+          ? `
+          <div class="sql-analysis-series-list">
+            ${visibleLabels.map((meta) => {
+          const label = meta.label;
+          const isActive = activeAnalysisParams.includes(label) || (!activeAnalysisParams.length && plottedLabels.has(label));
           const isHidden = hiddenAnalysisParams.includes(label);
           return `
-            <div class="sql-trace-card ${isActive ? "is-active" : ""} ${isHidden ? "is-hidden" : ""}">
-              <button class="parts-filter-chip ${isActive ? "is-active" : ""}" type="button" data-sql-analysis-param="${label}">
+            <div class="sql-analysis-series-row ${isActive ? "is-active" : ""} ${isHidden ? "is-hidden" : ""}">
+              <button class="sql-analysis-series-chip ${isActive ? "is-active" : ""}" type="button" data-sql-analysis-param="${label}">
                 ${label}
               </button>
-              <div class="sql-trace-meta">
-                <span>${series?.points.length || 0} draws</span>
-                <div class="sql-trace-mini-actions">
-                  <button class="sql-trace-mini" type="button" data-sql-analysis-focus="${label}">Focus</button>
-                  <button class="sql-trace-mini" type="button" data-sql-analysis-toggle="${label}">${isHidden ? "Show" : "Hide"}</button>
-                </div>
+              <div class="sql-analysis-series-meta">
+                <span>${meta.count || 0} draws</span>
+                <em>${meta.kind === "text" ? "text lane" : "numeric trace"}</em>
+              </div>
+              <div class="sql-trace-mini-actions">
+                <button class="sql-trace-mini" type="button" data-sql-analysis-focus="${label}">Focus</button>
+                <button class="sql-trace-mini" type="button" data-sql-analysis-toggle="${label}">${isHidden ? "Show" : "Hide"}</button>
               </div>
             </div>
           `;
-        }).join("")
-        : `<div class="micro-panel">No numeric matched values yet.</div>`;
+        }).join("")}
+          </div>
+        `
+          : `<div class="micro-panel">No matched parameters are ready to plot yet.</div>`;
       Array.from(analysisSeriesRoot.querySelectorAll("[data-sql-analysis-param]")).forEach((button) => {
         button.addEventListener("click", () => {
+          analysisPlotMode = analysisResourceMode;
           const label = button.dataset.sqlAnalysisParam;
+          const seededActiveLabels = activeAnalysisParams.length
+            ? [...activeAnalysisParams]
+            : [...plottedLabels];
           if (activeAnalysisParams.includes(label)) {
             activeAnalysisParams = activeAnalysisParams.filter((item) => item !== label);
+          } else if (!activeAnalysisParams.length && plottedLabels.has(label)) {
+            activeAnalysisParams = seededActiveLabels.filter((item) => item !== label);
           } else {
-            activeAnalysisParams = [...activeAnalysisParams, label].slice(-4);
+            activeAnalysisParams = dedupeStrings([...seededActiveLabels, label]);
           }
           renderSqlAnalysis();
         });
       });
       Array.from(analysisSeriesRoot.querySelectorAll("[data-sql-analysis-focus]")).forEach((button) => {
         button.addEventListener("click", () => {
+          analysisPlotMode = analysisResourceMode;
           activeAnalysisParams = [button.dataset.sqlAnalysisFocus];
           hiddenAnalysisParams = hiddenAnalysisParams.filter((item) => item !== button.dataset.sqlAnalysisFocus);
           renderSqlAnalysis();
@@ -14915,6 +18057,7 @@ function bindSqlLabPage(sqlData) {
       });
       Array.from(analysisSeriesRoot.querySelectorAll("[data-sql-analysis-toggle]")).forEach((button) => {
         button.addEventListener("click", () => {
+          analysisPlotMode = analysisResourceMode;
           const label = button.dataset.sqlAnalysisToggle;
           if (hiddenAnalysisParams.includes(label)) {
             hiddenAnalysisParams = hiddenAnalysisParams.filter((item) => item !== label);
@@ -14927,10 +18070,18 @@ function bindSqlLabPage(sqlData) {
       });
     }
 
-    currentAnalysisTargets = drawSqlAnalysisCanvas(seriesList, analysisCanvas, {
+    lastAnalysisCanvasModel = analysisModel;
+    lastAnalysisCanvasOverlays = {
       maintenance: lastFilterResult?.maintenance_events || [],
       faults: lastFilterResult?.fault_events || [],
-    }, selectedAnalysisTarget);
+    };
+    currentAnalysisTargets = drawSqlAnalysisCanvas(
+      lastAnalysisCanvasModel,
+      analysisCanvas,
+      lastAnalysisCanvasOverlays,
+      selectedAnalysisTarget,
+    );
+    scheduleSqlAnalysisCanvasRedraw();
 
     if (analysisMathRoot) {
       analysisMathRoot.innerHTML = seriesList.length
@@ -14948,10 +18099,11 @@ function bindSqlLabPage(sqlData) {
             </div>
           `;
         }).join("")
-        : `<div class="micro-panel">Run a filter with numeric results to unlock the plot and quick math read.</div>`;
+        : fullPlotModel.textSeries.length
+          ? `<div class="micro-panel">Categorical lanes are active. Add a numeric parameter if you want quick math cards too.</div>`
+          : `<div class="micro-panel">Run a filter with matched results to unlock the plot and quick math read.</div>`;
     }
     renderSqlMathLab(allSeries);
-    renderAnalysisResourceState();
   };
 
   const loadDataset = async (datasetName) => {
@@ -14999,7 +18151,7 @@ function bindSqlLabPage(sqlData) {
   includeMaintenance?.addEventListener("change", syncRuleAndLaneFields);
   includeFaults?.addEventListener("change", syncRuleAndLaneFields);
   useAllFiltered?.addEventListener("click", () => {
-    selectedParameterNames = dedupeStrings([...selectedParameterNames, ...filteredParameterNames()]);
+    selectedParameterNames = dedupeStrings([...selectedParameterNames, ...currentFilteredParameterNames().display]);
     renderDatasetMeta();
   });
   clearSelection?.addEventListener("click", () => {
@@ -15008,17 +18160,26 @@ function bindSqlLabPage(sqlData) {
   });
 
   plotAllMatchedButton?.addEventListener("click", () => {
-    const allLabels = Array.from(new Set(analysisSourceRows()
+    analysisPlotMode = analysisResourceMode;
+    const allLabels = Array.from(new Set(analysisSourceRows(analysisPlotMode)
       .map((item) => sqlAnalysisGroupLabel(item.parameter_name))
       .filter(Boolean)));
     hiddenAnalysisParams = [];
-    activeAnalysisParams = allLabels.slice(0, 4);
+    activeAnalysisParams = allLabels;
     renderSqlAnalysis();
   });
 
   plotClearButton?.addEventListener("click", () => {
     activeAnalysisParams = [];
     hiddenAnalysisParams = [];
+    renderSqlAnalysis();
+  });
+
+  restoreHiddenPointsButton?.addEventListener("click", async () => {
+    hiddenAnalysisPointKeys = [];
+    if (selectedAnalysisTarget) {
+      await renderAnalysisDetail(selectedAnalysisTarget);
+    }
     renderSqlAnalysis();
   });
 
@@ -15036,13 +18197,28 @@ function bindSqlLabPage(sqlData) {
     analysisReduceMode = analysisReducer.value || "avg";
     renderSqlAnalysis();
   });
+  analysisSearchInput?.addEventListener("input", () => {
+    renderSqlAnalysis();
+  });
+
+  if (analysisCanvas?.parentElement && window.ResizeObserver) {
+    const analysisResizeObserver = new ResizeObserver(() => {
+      scheduleSqlAnalysisCanvasRedraw();
+    });
+    analysisResizeObserver.observe(analysisCanvas.parentElement);
+  } else {
+    window.addEventListener("resize", scheduleSqlAnalysisCanvasRedraw);
+  }
 
   const updateMathConfig = () => {
+    const nextOperation = String(mathOperation?.value || "identity");
+    const nextExpression = String(mathExpression?.value || "A").trim() || "A";
     mathConfig = {
       sourceA: String(mathSourceA?.value || ""),
       sourceB: String(mathSourceB?.value || ""),
-      operation: String(mathOperation?.value || "identity"),
-      window: Math.max(2, Number(mathWindow?.value || 3)),
+      operation: nextOperation,
+      expression: nextExpression,
+      window: SQL_MATH_FIXED_WINDOW,
       reducer: analysisReduceMode,
     };
     hoveredMathKey = "";
@@ -15052,19 +18228,37 @@ function bindSqlLabPage(sqlData) {
   mathSourceA?.addEventListener("change", updateMathConfig);
   mathSourceB?.addEventListener("change", updateMathConfig);
   mathOperation?.addEventListener("change", updateMathConfig);
-  mathWindow?.addEventListener("input", updateMathConfig);
+  mathExpression?.addEventListener("input", () => {
+    if (mathOperation) mathOperation.value = "custom_ab";
+    updateMathConfig();
+  });
+  mathExpression?.addEventListener("change", () => {
+    if (mathOperation) mathOperation.value = "custom_ab";
+    updateMathConfig();
+  });
   mathPresetButtons.forEach((button) => {
     button.addEventListener("click", () => {
       if (mathOperation) mathOperation.value = button.dataset.sqlMathPreset;
       updateMathConfig();
     });
   });
+  mathExpressionExamples.forEach((button) => {
+    button.addEventListener("click", () => {
+      const example = String(button.dataset.sqlMathExpressionExample || "A").trim() || "A";
+      if (mathExpression) mathExpression.value = example;
+      if (mathOperation) mathOperation.value = "custom_ab";
+      updateMathConfig();
+    });
+  });
   mathSaveRecipeButton?.addEventListener("click", () => {
     if (!mathConfig.sourceA) return;
+    const expression = String(mathConfig.expression || "A").trim() || "A";
     const recipe = {
       ...mathConfig,
+      expression,
+      window: SQL_MATH_FIXED_WINDOW,
       recipeKey: sqlMathRecipeKey(mathConfig),
-      recipeName: `${sqlMathOperationLabel(mathConfig.operation)} · ${mathConfig.sourceA}${mathConfig.sourceB ? ` / ${mathConfig.sourceB}` : ""}`,
+      recipeName: `${sqlMathSeriesLabel(mathConfig.operation, expression)} · ${mathConfig.sourceA}${mathConfig.sourceB ? ` / ${mathConfig.sourceB}` : ""}`,
     };
     savedMathRecipes = [recipe, ...savedMathRecipes.filter((item) => item.recipeKey !== recipe.recipeKey)].slice(0, 3);
     renderSqlAnalysis();
@@ -15074,14 +18268,14 @@ function bindSqlLabPage(sqlData) {
     renderSqlAnalysis();
   });
 
-  const findAnalysisTarget = (event) => {
-    if (!analysisCanvas || !currentAnalysisTargets.length) return null;
-    const rect = analysisCanvas.getBoundingClientRect();
+  const findSqlCanvasTarget = (event, canvas, targets, mode = "hover") => {
+    if (!canvas || !targets.length) return null;
+    const rect = canvas.getBoundingClientRect();
     const x = event.clientX - rect.left;
     const y = event.clientY - rect.top;
     let best = null;
     let bestDist = Infinity;
-    currentAnalysisTargets.forEach((target) => {
+    targets.forEach((target) => {
       const dx = target.x - x;
       const dy = target.y - y;
       const dist = Math.sqrt(dx * dx + dy * dy);
@@ -15090,7 +18284,123 @@ function bindSqlLabPage(sqlData) {
         bestDist = dist;
       }
     });
-    return best;
+    if (best) return best;
+
+    const uniqueXs = Array.from(new Set(
+      targets
+        .map((target) => Number(target.x))
+        .filter((value) => Number.isFinite(value)),
+    )).sort((a, b) => a - b);
+    const spacings = [];
+    for (let index = 1; index < uniqueXs.length; index += 1) {
+      const gap = uniqueXs[index] - uniqueXs[index - 1];
+      if (gap > 0.5) spacings.push(gap);
+    }
+    const medianSpacing = spacings.length
+      ? spacings.sort((a, b) => a - b)[Math.floor(spacings.length / 2)]
+      : 18;
+    const xBandThreshold = Math.min(34, Math.max(14, medianSpacing * 0.7));
+
+    let xBandMatch = null;
+    let bestXDist = Infinity;
+    targets.forEach((target) => {
+      const xDist = Math.abs(target.x - x);
+      if (xDist > xBandThreshold) return;
+      const yDist = Math.abs(target.y - y);
+      const score = xDist * 2 + yDist;
+      if (score < bestXDist) {
+        xBandMatch = target;
+        bestXDist = score;
+      }
+    });
+    if (xBandMatch) return xBandMatch;
+    if (mode !== "click") return null;
+
+    const xOnlyThreshold = Math.min(72, Math.max(20, medianSpacing * 1.8));
+    let xOnlyMatch = null;
+    let xOnlyScore = Infinity;
+    targets.forEach((target) => {
+      const xDist = Math.abs(target.x - x);
+      if (xDist > xOnlyThreshold) return;
+      const yDist = Math.abs(target.y - y);
+      const score = xDist * 3 + yDist * 0.25;
+      if (score < xOnlyScore) {
+        xOnlyMatch = target;
+        xOnlyScore = score;
+      }
+    });
+    if (xOnlyMatch) return xOnlyMatch;
+
+    if (mode === "click") {
+      let nearestByX = null;
+      let nearestByXDist = Infinity;
+      targets.forEach((target) => {
+        const xDist = Math.abs(target.x - x);
+        if (xDist < nearestByXDist) {
+          nearestByX = target;
+          nearestByXDist = xDist;
+        }
+      });
+      if (nearestByX) return nearestByX;
+    }
+
+    let nearest = null;
+    let nearestScore = Infinity;
+    targets.forEach((target) => {
+      const xDist = Math.abs(target.x - x);
+      const yDist = Math.abs(target.y - y);
+      const score = xDist * 4 + yDist;
+      if (score < nearestScore) {
+        nearest = target;
+        nearestScore = score;
+      }
+    });
+    return nearestScore <= 96 ? nearest : null;
+  };
+
+  const findAnalysisTarget = (event, mode = "hover") => findSqlCanvasTarget(event, analysisCanvas, currentAnalysisTargets, mode);
+
+  let lastAnalysisSelectionStamp = 0;
+  let lastAnalysisSelectionSignature = "";
+  let lastMathSelectionStamp = 0;
+  let lastMathSelectionSignature = "";
+
+  const shouldSkipSqlSelection = (kind, event, stampRef, signatureRef) => {
+    const x = Math.round(Number(event?.clientX || 0));
+    const y = Math.round(Number(event?.clientY || 0));
+    const signature = `${kind}|${x}|${y}`;
+    const now = Date.now();
+    const previousStamp = kind === "analysis" ? lastAnalysisSelectionStamp : lastMathSelectionStamp;
+    const previousSignature = kind === "analysis" ? lastAnalysisSelectionSignature : lastMathSelectionSignature;
+    const isDuplicate = previousSignature === signature && (now - previousStamp) < 260;
+    if (kind === "analysis") {
+      lastAnalysisSelectionStamp = now;
+      lastAnalysisSelectionSignature = signature;
+    } else {
+      lastMathSelectionStamp = now;
+      lastMathSelectionSignature = signature;
+    }
+    return isDuplicate;
+  };
+
+  const positionSqlTooltip = (tooltip, shellRect, desiredLeft, desiredTop) => {
+    if (!tooltip) return;
+    tooltip.style.left = "0px";
+    tooltip.style.top = "0px";
+    tooltip.classList.add("is-visible");
+    const width = tooltip.offsetWidth || 240;
+    const height = tooltip.offsetHeight || 88;
+    const padding = 10;
+    const clampedLeft = Math.min(
+      Math.max(padding, desiredLeft),
+      Math.max(padding, shellRect.width - width - padding),
+    );
+    const clampedTop = Math.min(
+      Math.max(padding, desiredTop),
+      Math.max(padding, shellRect.height - height - padding),
+    );
+    tooltip.style.left = `${clampedLeft}px`;
+    tooltip.style.top = `${clampedTop}px`;
   };
 
   analysisCanvas?.addEventListener("mousemove", (event) => {
@@ -15098,19 +18408,21 @@ function bindSqlLabPage(sqlData) {
     if (!analysisHoverRoot) return;
     if (!target) {
       hoveredAnalysisKey = "";
+      hoveredAnalysisTarget = null;
       analysisHoverRoot.innerHTML = `Hover a point to inspect the draw, parameter, and value.`;
       if (analysisTooltip) {
         analysisTooltip.classList.remove("is-visible");
       }
       return;
     }
+    hoveredAnalysisTarget = target;
     const targetKey = target.type === "series"
       ? `${target.type}|${target.draw}|${target.label}|${target.ts}`
       : `${target.type}|${target.title}|${target.ts}`;
     if (targetKey !== hoveredAnalysisKey) {
       hoveredAnalysisKey = targetKey;
       analysisHoverRoot.innerHTML = target.type === "series"
-        ? `<strong>${target.draw}</strong> · ${target.label} · <strong>${Number(target.value).toFixed(2)}</strong> · ${target.ts || "Unknown time"}`
+        ? `<strong>${target.draw}</strong> · ${target.label} · <strong>${sqlFormatAnalysisValue(target)}</strong> · ${target.ts || "Unknown time"}`
         : `<strong>${target.type === "maintenance" ? "Maintenance" : "Fault"}</strong> · ${target.title || "Event"} · ${target.ts || "Unknown time"}`;
     }
     if (analysisTooltip && analysisCanvas) {
@@ -15119,17 +18431,21 @@ function bindSqlLabPage(sqlData) {
         : null;
       const shellRect = analysisCanvas.parentElement?.getBoundingClientRect() || analysisCanvas.getBoundingClientRect();
       analysisTooltip.innerHTML = target.type === "series"
-        ? `<strong>${target.draw}</strong><span>${target.label}</span><em>${Number(target.value).toFixed(2)} · ${target.ts || "Unknown time"} · ${drawMeta?.filename || "matched draw"}</em>`
+        ? `<strong>${target.draw}</strong><span>${target.label}</span><em>${sqlFormatAnalysisValue(target)} · ${target.ts || "Unknown time"} · ${drawMeta?.filename || "matched draw"}</em>`
         : `<strong>${target.type === "maintenance" ? "Maintenance" : "Fault"}</strong><span>${target.title || "Event"}</span><em>${target.ts || "Unknown time"} · event lane</em>`;
-      analysisTooltip.style.left = `${event.clientX - shellRect.left + 14}px`;
-      analysisTooltip.style.top = `${event.clientY - shellRect.top - 12}px`;
-      analysisTooltip.classList.add("is-visible");
+      positionSqlTooltip(
+        analysisTooltip,
+        shellRect,
+        event.clientX - shellRect.left + 14,
+        event.clientY - shellRect.top - 12,
+      );
     }
   });
 
   analysisCanvas?.addEventListener("mouseleave", () => {
     if (analysisHoverRoot) {
       hoveredAnalysisKey = "";
+      hoveredAnalysisTarget = null;
       analysisHoverRoot.innerHTML = `Hover a point to inspect the draw, parameter, and value.`;
     }
     if (analysisTooltip) {
@@ -15137,42 +18453,41 @@ function bindSqlLabPage(sqlData) {
     }
   });
 
-  analysisCanvas?.addEventListener("click", async (event) => {
-    const target = findAnalysisTarget(event);
+  const handleAnalysisCanvasSelection = async (event) => {
+    const target = findAnalysisTarget(event, "click") || hoveredAnalysisTarget;
+    if (!target) {
+      if (event?.type === "pointerup") return;
+      selectedAnalysisTarget = null;
+      detailExpanded = false;
+      detailTab = "overview";
+      await renderAnalysisDetail(null);
+      return;
+    }
+    if (shouldSkipSqlSelection("analysis", event)) return;
     selectedAnalysisTarget = target;
     detailExpanded = false;
+    detailTab = "overview";
+    revealSqlResultsStep({ openAnalysisStudio: true });
     renderSqlAnalysis();
     await renderAnalysisDetail(target);
-  });
-
-  const findMathTarget = (event) => {
-    if (!mathCanvas || !currentMathTargets.length) return null;
-    const rect = mathCanvas.getBoundingClientRect();
-    const x = event.clientX - rect.left;
-    const y = event.clientY - rect.top;
-    let best = null;
-    let bestDist = Infinity;
-    currentMathTargets.forEach((target) => {
-      const dx = target.x - x;
-      const dy = target.y - y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist <= target.radius && dist < bestDist) {
-        best = target;
-        bestDist = dist;
-      }
-    });
-    return best;
   };
+
+  analysisCanvas?.addEventListener("pointerup", handleAnalysisCanvasSelection);
+  analysisCanvas?.addEventListener("click", handleAnalysisCanvasSelection);
+
+  const findMathTarget = (event, mode = "hover") => findSqlCanvasTarget(event, mathCanvas, currentMathTargets, mode);
 
   mathCanvas?.addEventListener("mousemove", (event) => {
     const target = findMathTarget(event);
     if (!mathHoverRoot) return;
     if (!target) {
       hoveredMathKey = "";
+      hoveredMathTarget = null;
       mathHoverRoot.innerHTML = `Build a derived trace to compare families, detect drift, and inspect the same draw through a math lens.`;
       mathTooltip?.classList.remove("is-visible");
       return;
     }
+    hoveredMathTarget = target;
     const targetKey = `${target.draw}|${target.label}|${target.ts}`;
     if (targetKey !== hoveredMathKey) {
       hoveredMathKey = targetKey;
@@ -15181,27 +18496,45 @@ function bindSqlLabPage(sqlData) {
     if (mathTooltip && mathCanvas) {
       const shellRect = mathCanvas.parentElement?.getBoundingClientRect() || mathCanvas.getBoundingClientRect();
       mathTooltip.innerHTML = `<strong>${target.draw}</strong><span>${target.label}</span><em>${Number(target.value).toFixed(2)} · ${target.ts || "Unknown time"} · derived signal</em>`;
-      mathTooltip.style.left = `${event.clientX - shellRect.left + 14}px`;
-      mathTooltip.style.top = `${event.clientY - shellRect.top - 12}px`;
-      mathTooltip.classList.add("is-visible");
+      positionSqlTooltip(
+        mathTooltip,
+        shellRect,
+        event.clientX - shellRect.left + 14,
+        event.clientY - shellRect.top - 12,
+      );
     }
   });
 
   mathCanvas?.addEventListener("mouseleave", () => {
     hoveredMathKey = "";
+    hoveredMathTarget = null;
     if (mathHoverRoot) {
       mathHoverRoot.innerHTML = `Build a derived trace to compare families, detect drift, and inspect the same draw through a math lens.`;
     }
     mathTooltip?.classList.remove("is-visible");
   });
 
-  mathCanvas?.addEventListener("click", async (event) => {
-    const target = findMathTarget(event);
+  const handleMathCanvasSelection = async (event) => {
+    const target = findMathTarget(event, "click") || hoveredMathTarget;
+    if (!target) {
+      if (event?.type === "pointerup") return;
+      selectedAnalysisTarget = null;
+      detailExpanded = false;
+      detailTab = "overview";
+      await renderAnalysisDetail(null);
+      return;
+    }
+    if (shouldSkipSqlSelection("math", event)) return;
     selectedAnalysisTarget = target;
     detailExpanded = false;
+    detailTab = "overview";
+    revealSqlResultsStep({ openAnalysisStudio: true });
     renderSqlAnalysis();
     await renderAnalysisDetail(target ? { ...target, type: "series" } : null);
-  });
+  };
+
+  mathCanvas?.addEventListener("pointerup", handleMathCanvasSelection);
+  mathCanvas?.addEventListener("click", handleMathCanvasSelection);
 
   stepButtons.forEach((button) => {
     button.addEventListener("click", () => setStep(button.dataset.sqlStep));
@@ -15248,6 +18581,8 @@ function bindSqlLabPage(sqlData) {
       groupName,
       human: `${groupLogic} · ${params.length} parameter${params.length === 1 ? "" : "s"} · ${op}${value1 ? ` ${value1}` : ""}${op === "between" && value2 ? ` .. ${value2}` : ""}${negateToggle?.checked ? " · NOT" : ""}`,
     });
+    selectedParameterNames = [];
+    renderDatasetMeta();
     renderConditions();
     setStep("2");
   });
@@ -15264,33 +18599,18 @@ function bindSqlLabPage(sqlData) {
 
   runFilterButton?.addEventListener("click", async () => {
     try {
-      const payload = {
-        dataset: datasetSelect?.value || "__ALL__",
-        conditions: currentConditions.map((item) => ({
-          params: item.params,
-          op: item.op,
-          v1: item.v1,
-          v2: item.v2,
-          negate: item.negate,
-          joiner: item.joiner === "BASE" ? "AND" : item.joiner,
-          groupLogic: item.groupLogic,
-        })),
-        timeEnabled: Boolean(timeEnabled?.checked),
-        timeFrom: String(timeFrom?.value || ""),
-        timeTo: String(timeTo?.value || ""),
-        includeDraws: Boolean(includeDraws?.checked),
-        includeMaintenance: Boolean(includeMaintenance?.checked),
-        includeFaults: Boolean(includeFaults?.checked),
-        eventScope: String(eventScope?.value || "Only within matched draws window"),
-        maintenanceText: String(maintenanceText?.value || ""),
-        maintenanceComponent: String(maintenanceComponent?.value || ""),
-        faultText: String(faultText?.value || ""),
-        faultComponent: String(faultComponent?.value || ""),
-        faultSeverity: String(faultSeverity?.value || ""),
-      };
+      const payload = buildSqlFilterPayload();
       lastFilterResult = await postJson("/api/sql-lab/filter", payload);
+      lastFilterPayload = payload;
       analysisScopeCacheKey = "";
       analysisScopeData = { records: [], draw_count: 0, row_count: 0 };
+      renderSqlExportStatus(null);
+      const inspectPanel = page.querySelector('[data-sql-step-panel="3"]');
+      revealSqlResultsStep({
+        scrollTarget: inspectPanel,
+        openAnalysisStudio: true,
+        openMatchedDraws: false,
+      });
       renderRunSummary();
       if (matchedDrawsRoot) matchedDrawsRoot.innerHTML = sqlMatchedDrawsMarkup(lastFilterResult.matched_draws || []);
       if (matchedValuesRoot) matchedValuesRoot.innerHTML = sqlPreviewRowsMarkup((lastFilterResult.matched_values || []).map((item) => ({
@@ -15300,20 +18620,49 @@ function bindSqlLabPage(sqlData) {
       })));
       if (maintenanceResultsRoot) maintenanceResultsRoot.innerHTML = sqlEventRowsMarkup(lastFilterResult.maintenance_events || [], "maintenance events");
       if (faultResultsRoot) faultResultsRoot.innerHTML = sqlEventRowsMarkup(lastFilterResult.fault_events || [], "fault events");
-      if (analysisResourceMode === "draws") {
+      if (analysisResourceMode === "draws" || analysisPlotMode === "draws") {
         await ensureAnalysisScopeData();
-      } else {
-        renderAnalysisResourceState();
       }
       renderSqlAnalysis();
-      setStep("3");
-      const inspectPanel = page.querySelector('[data-sql-step-panel="3"]');
-      inspectPanel?.scrollIntoView({ behavior: "smooth", block: "start" });
-      const drawsSection = page.querySelector('[data-fold-key="Matched draws"]');
-      if (drawsSection) drawsSection.open = true;
-      bindFoldSections(page);
     } catch (error) {
       if (runSummaryRoot) runSummaryRoot.innerHTML = `<div class="micro-panel">${error.message}</div>`;
+    }
+  });
+
+  exportResultsButton?.addEventListener("click", async () => {
+    if (!lastFilterPayload) {
+      if (exportStatusRoot) {
+        exportStatusRoot.innerHTML = `<span>Run a filter first so the export matches the current Step 3 results.</span>`;
+      }
+      return;
+    }
+    const originalLabel = exportResultsButton.textContent;
+    exportResultsButton.disabled = true;
+    exportResultsButton.textContent = "Building CSV...";
+    if (exportStatusRoot) {
+      exportStatusRoot.innerHTML = `<span>Building matched results CSV from the current Step 3 filter...</span>`;
+    }
+    try {
+      const result = await postJson("/api/sql-lab/export-results", lastFilterPayload);
+      renderSqlExportStatus(result);
+      const downloadUrl = String(result?.downloadUrl || "").trim();
+      if (downloadUrl) {
+        const link = document.createElement("a");
+        link.href = downloadUrl;
+        link.download = String(result?.fileName || "").trim();
+        link.rel = "noopener";
+        link.style.display = "none";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      }
+    } catch (error) {
+      if (exportStatusRoot) {
+        exportStatusRoot.innerHTML = `<span>${escapeHtml(error.message || "Could not export matched results CSV.")}</span>`;
+      }
+    } finally {
+      exportResultsButton.disabled = false;
+      exportResultsButton.textContent = originalLabel || "Download matched results CSV";
     }
   });
 
@@ -15334,6 +18683,7 @@ function bindSqlLabPage(sqlData) {
   renderRunSummary();
   renderSqlAnalysis();
   renderAnalysisDetail(null);
+  renderSqlExportStatus(null);
   loadDataset("__ALL__");
 }
 
@@ -15364,6 +18714,11 @@ function bindDrawFinalizePage(finalizeData) {
         doneDescription: String(formData.get("doneDescription") || ""),
         preformLengthCm: formData.get("preformLengthCm"),
       });
+      drawFinalizeFlash = {
+        kind: result.print_ok ? "good" : (result.done_snapshot_path ? "warn" : "bad"),
+        title: result.print_ok ? "Draw Closed + Printed" : (result.done_snapshot_path ? "Draw Closed + Print Warning" : "Draw Closed"),
+        message: result.message || "Draw marked as done.",
+      };
       bootstrapData = result.bootstrap || null;
       await renderRoute();
     } catch (error) {
@@ -15386,6 +18741,11 @@ function bindDrawFinalizePage(finalizeData) {
         faultTitle: String(formData.get("faultTitle") || ""),
         faultDescription: String(formData.get("faultDescription") || ""),
       });
+      drawFinalizeFlash = {
+        kind: "warn",
+        title: "Draw Marked Failed",
+        message: result.message || "Draw marked as failed.",
+      };
       bootstrapData = result.bootstrap || null;
       await renderRoute();
     } catch (error) {
@@ -15399,6 +18759,11 @@ function bindDrawFinalizePage(finalizeData) {
         dataset: datasetSelect?.value,
         mode: "next-day",
       });
+      drawFinalizeFlash = {
+        kind: "good",
+        title: "Failed Draw Reset",
+        message: result.message || "Draw moved to next day.",
+      };
       bootstrapData = result.bootstrap || null;
       await renderRoute();
     } catch (error) {
@@ -15412,6 +18777,11 @@ function bindDrawFinalizePage(finalizeData) {
         dataset: datasetSelect?.value,
         mode: "pending",
       });
+      drawFinalizeFlash = {
+        kind: "good",
+        title: "Failed Draw Reset",
+        message: result.message || "Draw moved back to pending.",
+      };
       bootstrapData = result.bootstrap || null;
       await renderRoute();
     } catch (error) {
@@ -15428,6 +18798,9 @@ function bindDevelopmentPage(developmentData) {
   const projectForm = document.getElementById("development-project-form");
   const summaryForm = document.getElementById("development-summary-form");
   const experimentForm = document.getElementById("development-experiment-form");
+  const experimentFilesInput = document.getElementById("development-experiment-files");
+  const experimentDropzone = document.getElementById("development-experiment-dropzone");
+  const experimentFileSummary = document.getElementById("development-experiment-file-summary");
   const experimentEditForm = document.getElementById("development-experiment-edit-form");
   const experimentSelect = document.getElementById("development-experiment-select");
   const updateForm = document.getElementById("development-update-form");
@@ -15448,6 +18821,66 @@ function bindDevelopmentPage(developmentData) {
       reader.onerror = () => reject(new Error(`Could not read ${file.name}`));
       reader.readAsDataURL(file);
     });
+
+  const renderExperimentFileSummary = () => {
+    if (!experimentFileSummary) return;
+    const files = Array.from(experimentFilesInput?.files || []);
+    if (!files.length) {
+      experimentFileSummary.textContent = "No files chosen yet.";
+      return;
+    }
+    if (files.length <= 3) {
+      experimentFileSummary.textContent = files.map((file) => file.name).join(" · ");
+      return;
+    }
+    const head = files.slice(0, 3).map((file) => file.name).join(" · ");
+    experimentFileSummary.textContent = `${head} · +${files.length - 3} more`;
+  };
+
+  const setExperimentDropFiles = (files) => {
+    if (!experimentFilesInput || !files?.length) return;
+    const transfer = new DataTransfer();
+    Array.from(files).forEach((file) => transfer.items.add(file));
+    experimentFilesInput.files = transfer.files;
+    renderExperimentFileSummary();
+  };
+
+  renderExperimentFileSummary();
+  experimentFilesInput?.addEventListener("change", renderExperimentFileSummary);
+  if (experimentDropzone && experimentFilesInput) {
+    let dragDepth = 0;
+    const setDragState = (active) => {
+      experimentDropzone.classList.toggle("is-dragover", Boolean(active));
+    };
+    experimentDropzone.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      experimentFilesInput.click();
+    });
+    experimentDropzone.addEventListener("dragenter", (event) => {
+      event.preventDefault();
+      dragDepth += 1;
+      setDragState(true);
+    });
+    experimentDropzone.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+      setDragState(true);
+    });
+    experimentDropzone.addEventListener("dragleave", (event) => {
+      event.preventDefault();
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (!dragDepth) setDragState(false);
+    });
+    experimentDropzone.addEventListener("drop", (event) => {
+      event.preventDefault();
+      dragDepth = 0;
+      setDragState(false);
+      if (event.dataTransfer?.files?.length) {
+        setExperimentDropFiles(event.dataTransfer.files);
+      }
+    });
+  }
 
   const syncProjectForms = (projectName) => {
     if (!projectName) return;
@@ -15711,9 +19144,100 @@ function bindFoldSections(root = document) {
   });
 }
 
+function bindGlobalPressFeedback() {
+  if (globalPressFeedbackBound) return;
+  globalPressFeedbackBound = true;
+
+  const selector = "button, .action-btn, summary.fold-summary, .nav-group-title";
+  const holdMs = 160;
+  const dragTolerancePx = 6;
+  let activeElement = null;
+  let releaseTimer = 0;
+  let startX = 0;
+  let startY = 0;
+  let dragged = false;
+
+  const resolvePressable = (target) => (
+    target instanceof Element ? target.closest(selector) : null
+  );
+
+  const clearActive = (element = activeElement, immediate = false) => {
+    if (!element) return;
+    window.clearTimeout(releaseTimer);
+    const finish = () => {
+      element.classList.remove("is-pressing");
+      if (activeElement === element) activeElement = null;
+    };
+    if (immediate) {
+      finish();
+      return;
+    }
+    releaseTimer = window.setTimeout(finish, holdMs);
+  };
+
+  const setActive = (element, clientX = null, clientY = null) => {
+    if (!element) return;
+    if (element.matches(":disabled, [aria-disabled='true']")) return;
+    if (activeElement && activeElement !== element) {
+      activeElement.classList.remove("is-pressing");
+    }
+    window.clearTimeout(releaseTimer);
+    activeElement = element;
+    dragged = false;
+    if (typeof clientX === "number") startX = clientX;
+    if (typeof clientY === "number") startY = clientY;
+    element.classList.add("is-pressing");
+  };
+
+  document.addEventListener("pointerdown", (event) => {
+    const element = resolvePressable(event.target);
+    if (!element) return;
+    setActive(element, event.clientX, event.clientY);
+  }, true);
+
+  document.addEventListener("pointermove", (event) => {
+    if (!activeElement) return;
+    const moved = Math.hypot(event.clientX - startX, event.clientY - startY);
+    if (moved <= dragTolerancePx || dragged) return;
+    dragged = true;
+    activeElement.classList.remove("is-pressing");
+  }, true);
+
+  document.addEventListener("pointerup", (event) => {
+    const element = resolvePressable(event.target) || activeElement;
+    if (!element) return;
+    clearActive(element, dragged);
+    dragged = false;
+  }, true);
+
+  document.addEventListener("pointercancel", () => {
+    clearActive(activeElement, true);
+    dragged = false;
+  }, true);
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    const element = resolvePressable(document.activeElement);
+    if (!element) return;
+    setActive(element);
+  }, true);
+
+  document.addEventListener("keyup", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    const element = resolvePressable(document.activeElement) || activeElement;
+    if (!element) return;
+    clearActive(element);
+  }, true);
+}
+
 async function renderRoute() {
   const route = getCurrentRoute();
   const page = getPage(route);
+  if (page.key !== "consumables" && consumablesLivePollTimer) {
+    window.clearInterval(consumablesLivePollTimer);
+    consumablesLivePollTimer = null;
+    consumablesLivePollInFlight = false;
+  }
   app.innerHTML = renderShell(page.route);
   bindSidebarMap();
   const pageRoot = document.getElementById("page-root");
@@ -15769,4 +19293,5 @@ async function renderRoute() {
 }
 
 window.addEventListener("hashchange", renderRoute);
+bindGlobalPressFeedback();
 renderRoute();

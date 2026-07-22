@@ -17,6 +17,7 @@ from renders.tabs.data_diagnostics_tab import render_data_diagnostics_tab
 from renders.tabs.development_process_tab import render_development_process_tab
 from renders.tabs.draw_finalize_tab import render_draw_finalize_tab
 from renders.tabs.home_tab import render_home_tab
+from renders.tabs.home_tab_command_deck import render_home_tab_command_deck
 from renders.tabs.maintenance_tab import render_maintenance_tab
 from renders.tabs.order_draw_tab import render_order_draw_tab
 from renders.tabs.process_setup_tab import render_process_setup_tab_main
@@ -39,6 +40,20 @@ def render_selected_tab(tab_selection: str, P, image_base64: str, failed_reason_
             safe_str=safe_str,
             render_home_draw_orders_overview=render_home_draw_orders_overview,
             render_done_home_section=render_done_home_section,
+            render_schedule_home_minimal=render_schedule_home_minimal,
+            render_parts_orders_home_all=render_parts_orders_home_all,
+        )
+    elif tab_selection == "🛸 Home Command Deck":
+        render_home_tab_command_deck(
+            P=P,
+            image_base64=image_base64,
+            STATUS_COL=STATUS_COL,
+            STATUS_UPDATED_COL=STATUS_UPDATED_COL,
+            FAILED_REASON_COL=failed_reason_col,
+            parse_dt_safe=parse_dt_safe,
+            now_str=now_str,
+            safe_str=safe_str,
+            render_home_draw_orders_overview=render_home_draw_orders_overview,
             render_schedule_home_minimal=render_schedule_home_minimal,
             render_parts_orders_home_all=render_parts_orders_home_all,
         )

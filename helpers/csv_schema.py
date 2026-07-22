@@ -35,7 +35,7 @@ REQUIRED_CSV_COLUMNS: Dict[str, List[str]] = {
         "C_container_c",
         "D_container_c",
     ],
-    "tower_containers": ["A_level_kg", "A_type", "B_level_kg", "B_type", "C_level_kg", "C_type", "D_level_kg", "D_type"],
+    "tower_containers": ["timestamp", "tank1", "tank2", "tank3", "tank4"],
 }
 
 

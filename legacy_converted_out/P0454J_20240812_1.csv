@@ -31,7 +31,7 @@ Fiber Diameter (µm),125,µm
 Entry Fiber Diameter (µm),125,µm
 Main Coating Diameter (µm),167,µm
 Secondary Coating Diameter (µm),260,µm
-Furnace DegC Set,21202035,°C
+Furnace DegC Set,"2120,2035",°C
 Preform Shape,Round,
 Preform Diameter,27.75,mm
 Total Fiber Length (m),2604,m
@@ -53,9 +53,9 @@ Good Zone 1 Fibre Length Max,1.493,km
 Marked Zone 1 Avg - Bare Fibre Diameter,125.0,
 Marked Zone 1 Min - Bare Fibre Diameter,125.0,
 Marked Zone 1 Max - Bare Fibre Diameter,125.0,
-Marked Zone 1 Avg - Furnace DegC Actual,21202035.0,
-Marked Zone 1 Min - Furnace DegC Actual,21202035.0,
-Marked Zone 1 Max - Furnace DegC Actual,21202035.0,
+Marked Zone 1 Avg - Furnace DegC Actual,2120.0,
+Marked Zone 1 Min - Furnace DegC Actual,2120.0,
+Marked Zone 1 Max - Furnace DegC Actual,2120.0,
 Marked Zone 1 Avg - Capstan Speed,24.72,
 Marked Zone 1 Min - Capstan Speed,24.72,
 Marked Zone 1 Max - Capstan Speed,24.72,
@@ -75,9 +75,9 @@ Good Zone 2 Fibre Length Max,2.577,km
 Marked Zone 2 Avg - Bare Fibre Diameter,125.0,
 Marked Zone 2 Min - Bare Fibre Diameter,125.0,
 Marked Zone 2 Max - Bare Fibre Diameter,125.0,
-Marked Zone 2 Avg - Furnace DegC Actual,21202035.0,
-Marked Zone 2 Min - Furnace DegC Actual,21202035.0,
-Marked Zone 2 Max - Furnace DegC Actual,21202035.0,
+Marked Zone 2 Avg - Furnace DegC Actual,2035.0,
+Marked Zone 2 Min - Furnace DegC Actual,2035.0,
+Marked Zone 2 Max - Furnace DegC Actual,2035.0,
 Marked Zone 2 Avg - Capstan Speed,24.72,
 Marked Zone 2 Min - Capstan Speed,24.72,
 Marked Zone 2 Max - Capstan Speed,24.72,

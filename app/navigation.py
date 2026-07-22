@@ -7,6 +7,7 @@ import streamlit as st
 NAV_GROUPS = {
     "🏠 Home & Project Management": [
         "🏠 Home",
+        "🛸 Home Command Deck",
         "📅 Schedule",
         "📦 Order Draw",
         "🛠️ Tower Parts",
@@ -30,6 +31,7 @@ NAV_GROUPS = {
 SAFE_NAV_GROUPS = {
     "🛡 Safe Mode": [
         "🏠 Home",
+        "🛸 Home Command Deck",
         "🩺 Data Diagnostics",
         "🧪 SQL Lab",
     ]

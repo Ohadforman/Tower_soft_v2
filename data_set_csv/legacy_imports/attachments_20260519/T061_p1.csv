@@ -1,0 +1,88 @@
+Parameter Name,Value,Units
+=== ORDER PARAMETERS ===,,
+Order__Draw Name,T061_p1,
+Order__Draw Date,2025-08-17 13:13:00.986272,
+Order__Order Index,,
+Order__Preform Number,T061_p1,
+Order__Fiber Project,TAMAM - TIGER,
+Order__Priority,Normal,
+Order__Order Opener,,
+Order__Fiber Geometry Type,TIGER - PM,
+Order__Tiger Cut (%),27.0,%
+Order__Octagonal F2F (mm),0.0,mm
+Order__Required Length (m) (for T&M+costumer),,m
+Order__Good Zones Count (required length zones),0,count
+Order__Fiber Diameter (µm),40.0,µm
+Order__Main Coating Diameter (µm),80.0,µm
+Order__Secondary Coating Diameter (µm),110.0,µm
+Order__Tension (g),20.0,g
+Order__Draw Speed (m/min),50.0,m/min
+Order__Main Coating,DP-1032,
+Order__Secondary Coating,DS-2015,
+Order__Main Coating Temperature (°C),36.0,°C
+Order__Secondary Coating Temperature (°C),24.0,°C
+Order__Order Notes,,
+,,
+=== PROCESS SETUP ===,,
+Process__Process Setup Timestamp,2025-08-17 13:13:00.986272,
+Process__Preform Diameter,16.5,mm
+Process__Preform Shape,Tiger Cut,
+Process__Octagonal Preform,0,bool
+Process__Octagonal F2F,,mm
+Process__Tiger Preform,1,bool
+Process__Tiger Cut,27.0,%
+Process__PM Iris System,1,bool
+Process__Iris Mode,PM Auto,
+Process__Base Area,,mm^2
+Process__Adjusted Area,,mm^2
+Process__Effective Preform Diameter,,mm
+Process__Selected Iris Diameter,21.5,mm
+Process__Iris Gap Area,,mm^2
+Process__Entry Fiber Diameter,40.0,µm
+Process__Target First Coating Diameter,,µm
+Process__Target Second Coating Diameter,,µm
+Process__First Coating Diameter (Theoretical),88.91659110140624,µm
+Process__Second Coating Diameter (Theoretical),113.49131195007027,µm
+Process__Primary Coating,DP-1032,
+Process__Secondary Coating,DS-2015,
+Process__Primary Coating Temperature,36.0,°C
+Process__Secondary Coating Temperature,24.0,°C
+Process__Primary Die Diameter,150,µm
+Process__Secondary Die Diameter,140,µm
+Process__Primary Die Name,Die_150,
+Process__Secondary Die Name,Die_140,
+Process__Coating Die Selection Mode,Auto,
+Process__Draw Speed,,m/min
+Process__P Gain (Diameter Control),0.4,
+Process__I Gain (Diameter Control),1.0,
+Process__TF Mode,Winder,
+Process__Increment TF Value,0.128,mm
+Process__Selected Drum,,
+,,
+=== LOGS DATA SECTION ===,,
+,,
+### DASHBOARD ZONES,,
+,,
+Zones Saved Timestamp,2025-08-17 13:13:00.986272,
+Dashboard Log File,,
+Good Zones Count,0,count
+Good Zones X Column,Fibre Length,
+,,
+,,
+### WINDER & LENGTH,,
+,,
+Drum | Selected,,
+Fiber Length | End (log end),,km
+,,
+—,—,
+CUT/SAVE Plan Source,T061_p1.csv,
+AUTO Plan Mode,,
+Zone Length Column (log),Fibre Length,
+Fiber Length End (log end),,km
+Fiber Length Min (log),,km
+Fiber Length Max (log),,km
+T&M Coordinate System,,
+Good Zones Order,,
+Preform Length After Draw,,cm
+Done Description,,
+Done Timestamp,,

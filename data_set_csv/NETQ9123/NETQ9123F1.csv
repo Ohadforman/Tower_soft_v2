@@ -1,0 +1,62 @@
+Parameter Name,Value,Units
+=== ORDER PARAMETERS ===,,
+Order__Draw Name,NETQ9123F1,
+Order__Draw Date,2026-05-26 21:02:00,
+Order__Order Index,21,
+Order__Preform Number,NETQ9123,
+Order__Fiber Project,Network Smoke Project 210123,
+Order__Priority,Normal,
+Order__Order Opener,Codex,
+Order__Fiber Geometry Type,Round,
+Order__Preform Diameter (mm),16.0,mm
+Order__Tiger Cut (%),0.0,%
+Order__Octagonal F2F (mm),0.0,mm
+Order__Required Length (m) (for T&M+costumer),1100.0,m
+Order__Good Zones Count (required length zones),1,count
+Order__Fiber Diameter (µm),125.0,µm
+Order__Fiber Diameter Tol (± µm),1.0,µm
+Order__Main Coating Diameter (µm),245.0,µm
+Order__Main Coating Diameter Tol (± µm),2.0,µm
+Order__Secondary Coating Diameter (µm),400.0,µm
+Order__Secondary Coating Diameter Tol (± µm),3.0,µm
+Order__Tension (g),35.0,g
+Order__Draw Speed (m/min),5.0,m/min
+Order__Furnace Temperature (°C),2120.0,°C
+Order__Main Coating,UV Main,
+Order__Secondary Coating,UV Secondary,
+Order__Main Coating Temperature (°C),62.0,°C
+Order__Secondary Coating Temperature (°C),58.0,°C
+Order__Order Notes,Network scheduled-start smoke,
+,,
+—,—,
+Dashboard Log File,NetworkCopy_Training_network_smoke_raw.csv,
+Good Zones Count,1,count
+Good Zones X Column,Bare Fibre Diameter,
+Zone 1 | Start,125.0,Bare Fibre Diameter
+Zone 1 | End,125.15,Bare Fibre Diameter
+Zone 1 | Length span,2.0,km
+Zone 1 | Bare Fibre Diameter | Avg,125.08780487804879,
+Zone 1 | Bare Fibre Diameter | Min,125.0,
+Zone 1 | Bare Fibre Diameter | Max,125.18,
+Zone 1 | Furnace DegC Actual | Avg,2109.0,
+Zone 1 | Furnace DegC Actual | Min,2100.0,
+Zone 1 | Furnace DegC Actual | Max,2118.0,
+Zone 1 | Fibre Length | Avg,1.0,
+Zone 1 | Fibre Length | Min,0.0,
+Zone 1 | Fibre Length | Max,2.0,
+Zone 1 | UV 1 Intensity | Avg,82.39024390243902,
+Zone 1 | UV 1 Intensity | Min,82.0,
+Zone 1 | UV 1 Intensity | Max,82.8,
+Zone 1 | Furnace MFC1 Actual | Avg,1.173170731707317,
+Zone 1 | Furnace MFC1 Actual | Min,1.1,
+Zone 1 | Furnace MFC1 Actual | Max,1.25,
+Zone 1 | Good Fibre State | Avg,0.7560975609756098,
+Zone 1 | Good Fibre State | Min,0.0,
+Zone 1 | Good Fibre State | Max,1.0,
+Zone 1 | Trend Marker | Avg,0.024390243902439025,
+Zone 1 | Trend Marker | Min,0.0,
+Zone 1 | Trend Marker | Max,1.0,
+,,
+Done Description,Network smoke done,
+Done Timestamp,2026-05-26 21:02:01,
+Preform Length After Draw,123.4,cm

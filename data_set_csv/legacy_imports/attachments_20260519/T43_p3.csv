@@ -1,0 +1,314 @@
+Parameter Name,Value,Units
+=== ORDER PARAMETERS ===,,
+Order__Draw Name,T43_p3,
+Order__Draw Date,2025-08-27 10:08:53.168131,
+Order__Order Index,,
+Order__Preform Number,T43_p3,
+Order__Fiber Project,,
+Order__Priority,Normal,
+Order__Order Opener,,
+Order__Fiber Geometry Type,TIGER - PM,
+Order__Tiger Cut (%),27.0,%
+Order__Octagonal F2F (mm),,mm
+Order__Required Length (m) (for T&M+costumer),,m
+Order__Good Zones Count (required length zones),7,count
+Order__Fiber Diameter (µm),16.5,µm
+Order__Main Coating Diameter (µm),,µm
+Order__Secondary Coating Diameter (µm),,µm
+Order__Tension (g),,g
+Order__Draw Speed (m/min),,m/min
+Order__Main Coating,DP-1032,
+Order__Secondary Coating,DS-2015,
+Order__Main Coating Temperature (°C),36.0,°C
+Order__Secondary Coating Temperature (°C),24.0,°C
+Order__Order Notes,,
+,,
+=== PROCESS SETUP ===,,
+Process__Process Setup Timestamp,2025-08-27 10:08:53.168131,
+Process__Preform Diameter,16.5,mm
+Process__Preform Shape,Tiger Cut,
+Process__Octagonal Preform,0,bool
+Process__Octagonal F2F,,mm
+Process__Tiger Preform,1,bool
+Process__Tiger Cut,27.0,%
+Process__PM Iris System,1,bool
+Process__Iris Mode,PM Auto,
+Process__Base Area,,mm^2
+Process__Adjusted Area,,mm^2
+Process__Effective Preform Diameter,,mm
+Process__Selected Iris Diameter,25.0,mm
+Process__Iris Gap Area,,mm^2
+Process__Entry Fiber Diameter,16.5,µm
+Process__Target First Coating Diameter,,µm
+Process__Target Second Coating Diameter,,µm
+Process__First Coating Diameter (Theoretical),70.95863489123576,µm
+Process__Second Coating Diameter (Theoretical),103.52117658184827,µm
+Process__Primary Coating,DP-1032,
+Process__Secondary Coating,DS-2015,
+Process__Primary Coating Temperature,36.0,°C
+Process__Secondary Coating Temperature,24.0,°C
+Process__Primary Die Diameter,150,µm
+Process__Secondary Die Diameter,140,µm
+Process__Primary Die Name,Die_150,
+Process__Secondary Die Name,Die_140,
+Process__Coating Die Selection Mode,Auto,
+Process__Draw Speed,,m/min
+Process__P Gain (Diameter Control),1.0,
+Process__I Gain (Diameter Control),0.4,
+Process__TF Mode,Winder,
+Process__Increment TF Value,0.13,mm
+Process__Selected Drum,,
+,,
+=== LOGS DATA SECTION ===,,
+,,
+### DASHBOARD ZONES,,
+,,
+Zones Saved Timestamp,2025-08-27 10:08:53.168131,
+Dashboard Log File,T43_p3_27082025_150242.csv,
+Good Zones Count,7,count
+Good Zones X Column,Fibre Length,
+Zone 1 | Start,2025-08-27 13:58:47.255000,index/label
+Zone 1 | End,2025-08-27 14:07:13.255000,index/label
+Zone 1 | Bare Fibre Diameter | Avg,40.37,µm
+Zone 1 | Bare Fibre Diameter | Max,46.3,µm
+Zone 1 | Bare Fibre Diameter | Min,34.2,µm
+Zone 1 | Capstan Speed | Avg,56.38,m/min
+Zone 1 | Capstan Speed | Max,75.94,m/min
+Zone 1 | Capstan Speed | Min,34.46,m/min
+Zone 1 | Coated Inner Diameter | Avg,93.4,µm
+Zone 1 | Coated Inner Diameter | Max,96.3,µm
+Zone 1 | Coated Inner Diameter | Min,91.7,µm
+Zone 1 | Coated Outer Diameter | Avg,119.77,µm
+Zone 1 | Coated Outer Diameter | Max,121.2,µm
+Zone 1 | Coated Outer Diameter | Min,118.6,µm
+Zone 1 | Furnace DegC Actual | Avg,2309.99,C
+Zone 1 | Furnace DegC Actual | Max,2310.67,C
+Zone 1 | Furnace DegC Actual | Min,2309.19,C
+Zone 1 | Tension N | Avg,0.03,g
+Zone 1 | Tension N | Max,0.09,g
+Zone 1 | Tension N | Min,-0.01,g
+Zone 2 | Start,2025-08-27 14:09:20.255000,index/label
+Zone 2 | End,2025-08-27 14:32:43.255000,index/label
+Zone 2 | Bare Fibre Diameter | Avg,40.04,µm
+Zone 2 | Bare Fibre Diameter | Max,41.5,µm
+Zone 2 | Bare Fibre Diameter | Min,38.1,µm
+Zone 2 | Capstan Speed | Avg,103.4,m/min
+Zone 2 | Capstan Speed | Max,112.03,m/min
+Zone 2 | Capstan Speed | Min,80.54,m/min
+Zone 2 | Coated Inner Diameter | Avg,93.62,µm
+Zone 2 | Coated Inner Diameter | Max,94.7,µm
+Zone 2 | Coated Inner Diameter | Min,92.0,µm
+Zone 2 | Coated Outer Diameter | Avg,119.63,µm
+Zone 2 | Coated Outer Diameter | Max,121.0,µm
+Zone 2 | Coated Outer Diameter | Min,118.4,µm
+Zone 2 | Furnace DegC Actual | Avg,2320.01,C
+Zone 2 | Furnace DegC Actual | Max,2320.74,C
+Zone 2 | Furnace DegC Actual | Min,2319.27,C
+Zone 2 | Tension N | Avg,-0.03,g
+Zone 2 | Tension N | Max,0.04,g
+Zone 2 | Tension N | Min,-0.1,g
+Zone 3 | Start,2025-08-27 14:34:15.255000,index/label
+Zone 3 | End,2025-08-27 14:38:05.255000,index/label
+Zone 3 | Bare Fibre Diameter | Avg,40.11,µm
+Zone 3 | Bare Fibre Diameter | Max,41.5,µm
+Zone 3 | Bare Fibre Diameter | Min,38.8,µm
+Zone 3 | Capstan Speed | Avg,109.32,m/min
+Zone 3 | Capstan Speed | Max,119.14,m/min
+Zone 3 | Capstan Speed | Min,104.74,m/min
+Zone 3 | Coated Inner Diameter | Avg,93.95,µm
+Zone 3 | Coated Inner Diameter | Max,94.4,µm
+Zone 3 | Coated Inner Diameter | Min,93.3,µm
+Zone 3 | Coated Outer Diameter | Avg,119.72,µm
+Zone 3 | Coated Outer Diameter | Max,120.6,µm
+Zone 3 | Coated Outer Diameter | Min,118.9,µm
+Zone 3 | Furnace DegC Actual | Avg,2330.03,C
+Zone 3 | Furnace DegC Actual | Max,2330.82,C
+Zone 3 | Furnace DegC Actual | Min,2329.21,C
+Zone 3 | Tension N | Avg,-0.1,g
+Zone 3 | Tension N | Max,-0.04,g
+Zone 3 | Tension N | Min,-0.15,g
+Zone 4 | Start,2025-08-27 14:39:14.255000,index/label
+Zone 4 | End,2025-08-27 14:45:23.255000,index/label
+Zone 4 | Bare Fibre Diameter | Avg,39.96,µm
+Zone 4 | Bare Fibre Diameter | Max,40.5,µm
+Zone 4 | Bare Fibre Diameter | Min,39.4,µm
+Zone 4 | Capstan Speed | Avg,118.34,m/min
+Zone 4 | Capstan Speed | Max,125.86,m/min
+Zone 4 | Capstan Speed | Min,114.14,m/min
+Zone 4 | Coated Inner Diameter | Avg,92.79,µm
+Zone 4 | Coated Inner Diameter | Max,93.4,µm
+Zone 4 | Coated Inner Diameter | Min,92.2,µm
+Zone 4 | Coated Outer Diameter | Avg,119.55,µm
+Zone 4 | Coated Outer Diameter | Max,120.2,µm
+Zone 4 | Coated Outer Diameter | Min,118.6,µm
+Zone 4 | Furnace DegC Actual | Avg,2309.95,C
+Zone 4 | Furnace DegC Actual | Max,2310.8,C
+Zone 4 | Furnace DegC Actual | Min,2309.32,C
+Zone 4 | Tension N | Avg,-0.12,g
+Zone 4 | Tension N | Max,-0.06,g
+Zone 4 | Tension N | Min,-0.16,g
+Zone 5 | Start,2025-08-27 14:46:20.255000,index/label
+Zone 5 | End,2025-08-27 14:53:14.255000,index/label
+Zone 5 | Bare Fibre Diameter | Avg,39.98,µm
+Zone 5 | Bare Fibre Diameter | Max,40.6,µm
+Zone 5 | Bare Fibre Diameter | Min,38.4,µm
+Zone 5 | Capstan Speed | Avg,114.89,m/min
+Zone 5 | Capstan Speed | Max,121.25,m/min
+Zone 5 | Capstan Speed | Min,112.03,m/min
+Zone 5 | Coated Inner Diameter | Avg,92.67,µm
+Zone 5 | Coated Inner Diameter | Max,93.7,µm
+Zone 5 | Coated Inner Diameter | Min,91.8,µm
+Zone 5 | Coated Outer Diameter | Avg,119.28,µm
+Zone 5 | Coated Outer Diameter | Max,120.4,µm
+Zone 5 | Coated Outer Diameter | Min,117.3,µm
+Zone 5 | Furnace DegC Actual | Avg,2289.89,C
+Zone 5 | Furnace DegC Actual | Max,2290.38,C
+Zone 5 | Furnace DegC Actual | Min,2288.9,C
+Zone 5 | Tension N | Avg,-0.13,g
+Zone 5 | Tension N | Max,-0.08,g
+Zone 5 | Tension N | Min,-0.16,g
+Zone 6 | Start,2025-08-27 14:54:23.255000,index/label
+Zone 6 | End,2025-08-27 15:00:55.255000,index/label
+Zone 6 | Bare Fibre Diameter | Avg,40.01,µm
+Zone 6 | Bare Fibre Diameter | Max,40.3,µm
+Zone 6 | Bare Fibre Diameter | Min,39.8,µm
+Zone 6 | Capstan Speed | Avg,117.54,m/min
+Zone 6 | Capstan Speed | Max,119.33,m/min
+Zone 6 | Capstan Speed | Min,116.35,m/min
+Zone 6 | Coated Inner Diameter | Avg,92.26,µm
+Zone 6 | Coated Inner Diameter | Max,93.0,µm
+Zone 6 | Coated Inner Diameter | Min,92.0,µm
+Zone 6 | Coated Outer Diameter | Avg,119.51,µm
+Zone 6 | Coated Outer Diameter | Max,120.1,µm
+Zone 6 | Coated Outer Diameter | Min,119.0,µm
+Zone 6 | Furnace DegC Actual | Avg,2280.02,C
+Zone 6 | Furnace DegC Actual | Max,2281.1,C
+Zone 6 | Furnace DegC Actual | Min,2278.95,C
+Zone 6 | Tension N | Avg,-0.14,g
+Zone 6 | Tension N | Max,-0.09,g
+Zone 6 | Tension N | Min,-0.18,g
+Zone 7 | Start,2025-08-27 14:54:23.255000,index/label
+Zone 7 | End,2025-08-27 15:00:55.255000,index/label
+Zone 7 | Bare Fibre Diameter | Avg,40.01,µm
+Zone 7 | Bare Fibre Diameter | Max,40.3,µm
+Zone 7 | Bare Fibre Diameter | Min,39.8,µm
+Zone 7 | Capstan Speed | Avg,117.54,m/min
+Zone 7 | Capstan Speed | Max,119.33,m/min
+Zone 7 | Capstan Speed | Min,116.35,m/min
+Zone 7 | Coated Inner Diameter | Avg,92.26,µm
+Zone 7 | Coated Inner Diameter | Max,93.0,µm
+Zone 7 | Coated Inner Diameter | Min,92.0,µm
+Zone 7 | Coated Outer Diameter | Avg,119.51,µm
+Zone 7 | Coated Outer Diameter | Max,120.1,µm
+Zone 7 | Coated Outer Diameter | Min,119.0,µm
+Zone 7 | Furnace DegC Actual | Avg,2280.02,C
+Zone 7 | Furnace DegC Actual | Max,2281.1,C
+Zone 7 | Furnace DegC Actual | Min,2278.95,C
+Zone 7 | Tension N | Avg,-0.14,g
+Zone 7 | Tension N | Max,-0.09,g
+Zone 7 | Tension N | Min,-0.18,g
+,,
+,,
+### WINDER & LENGTH,,
+,,
+Drum | Selected,,
+Fiber Length | End (log end),4.76,km
+Zone 1 | Fiber Length | Min,0.5,km
+Zone 1 | Fiber Length | Max,0.97,km
+Zone 2 | Fiber Length | Min,1.14,km
+Zone 2 | Fiber Length | Max,1.36,km
+Zone 3 | Fiber Length | Min,1.53,km
+Zone 3 | Fiber Length | Max,1.94,km
+Zone 4 | Fiber Length | Min,2.1,km
+Zone 4 | Fiber Length | Max,2.82,km
+Zone 5 | Fiber Length | Min,2.93,km
+Zone 5 | Fiber Length | Max,3.72,km
+Zone 6 | Fiber Length | Min,3.86,km
+Zone 6 | Fiber Length | Max,4.61,km
+Zone 7 | Fiber Length | Min,3.86,km
+Zone 7 | Fiber Length | Max,4.61,km
+,,
+—,—,
+CUT/SAVE Plan Source,T43_p3.csv,
+AUTO Plan Mode,,
+Zone Length Column (log),Fibre Length,
+Fiber Length End (log end),4.76,km
+Fiber Length Min (log),,km
+Fiber Length Max (log),4.76,km
+T&M Coordinate System,,
+Good Zones Order,,
+Good Zone 1 (km from end) Start,3.79,km
+Good Zone 1 (km from end) End,4.26,km
+Good Zone 1 Length,0.47,km
+Good Zone 1 Fibre Length Min,0.5,km
+Good Zone 1 Fibre Length Max,0.97,km
+Good Zone 2 (km from end) Start,3.4,km
+Good Zone 2 (km from end) End,3.62,km
+Good Zone 2 Length,0.22,km
+Good Zone 2 Fibre Length Min,1.14,km
+Good Zone 2 Fibre Length Max,1.36,km
+Good Zone 3 (km from end) Start,2.82,km
+Good Zone 3 (km from end) End,3.23,km
+Good Zone 3 Length,0.41,km
+Good Zone 3 Fibre Length Min,1.53,km
+Good Zone 3 Fibre Length Max,1.94,km
+Good Zone 4 (km from end) Start,1.94,km
+Good Zone 4 (km from end) End,2.66,km
+Good Zone 4 Length,0.72,km
+Good Zone 4 Fibre Length Min,2.1,km
+Good Zone 4 Fibre Length Max,2.82,km
+Good Zone 5 (km from end) Start,1.04,km
+Good Zone 5 (km from end) End,1.83,km
+Good Zone 5 Length,0.79,km
+Good Zone 5 Fibre Length Min,2.93,km
+Good Zone 5 Fibre Length Max,3.72,km
+Good Zone 6 (km from end) Start,0.149999999999999,km
+Good Zone 6 (km from end) End,0.9,km
+Good Zone 6 Length,0.750000000000001,km
+Good Zone 6 Fibre Length Min,3.86,km
+Good Zone 6 Fibre Length Max,4.61,km
+Good Zone 7 (km from end) Start,0.149999999999999,km
+Good Zone 7 (km from end) End,0.9,km
+Good Zone 7 Length,0.750000000000001,km
+Good Zone 7 Fibre Length Min,3.86,km
+Good Zone 7 Fibre Length Max,4.61,km
+T&M Step 1 Action,CUT,
+T&M Step 1 Length,3.79,km
+T&M Step 2 Action,SAVE,
+T&M Step 2 Length,0.48,km
+T&M Step 2 Zone,Good Zone 1,
+T&M Step 3 Action,CUT,
+T&M Step 3 Length,3.4,km
+T&M Step 4 Action,SAVE,
+T&M Step 4 Length,0.22,km
+T&M Step 4 Zone,Good Zone 2,
+T&M Step 5 Action,CUT,
+T&M Step 5 Length,2.82,km
+T&M Step 6 Action,SAVE,
+T&M Step 6 Length,0.41,km
+T&M Step 6 Zone,Good Zone 3,
+T&M Step 7 Action,CUT,
+T&M Step 7 Length,1.95,km
+T&M Step 8 Action,SAVE,
+T&M Step 8 Length,0.72,km
+T&M Step 8 Zone,Good Zone 4,
+T&M Step 9 Action,CUT,
+T&M Step 9 Length,1.05,km
+T&M Step 10 Action,SAVE,
+T&M Step 10 Length,0.79,km
+T&M Step 10 Zone,Good Zone 5,
+T&M Step 11 Action,CUT,
+T&M Step 11 Length,0.15,km
+T&M Step 12 Action,SAVE,
+T&M Step 12 Length,0.75,km
+T&M Step 12 Zone,Good Zone 6,
+T&M Step 13 Action,CUT,
+T&M Step 13 Length,0.15,km
+T&M Step 14 Action,SAVE,
+T&M Step 14 Length,0.75,km
+T&M Step 14 Zone,Good Zone 7,
+Total Saved Length,4.12,km
+Total Cut Length,13.31,km
+Preform Length After Draw,,cm
+Done Description,,
+Done Timestamp,,

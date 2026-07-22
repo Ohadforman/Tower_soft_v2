@@ -1,0 +1,32 @@
+Parameter Name,Value,Units
+=== ZONE SNAPSHOT ===,,
+Zone Number,1,
+Dashboard Log File,NetworkCopy_Training_network_smoke_raw.csv,
+Good Zones X Column,Bare Fibre Diameter,
+Zone Length Column (log),Fibre Length,
+Zone 1 | Start,125.0,Bare Fibre Diameter
+Zone 1 | End,125.15,Bare Fibre Diameter
+Zone 1 | Length span,2.0,km
+Zone 1 | Fibre Length | Min,0.0,km
+Zone 1 | Fibre Length | Max,2.0,km
+Zone 1 | Bare Fibre Diameter | Avg,125.08780487804879,
+Zone 1 | Bare Fibre Diameter | Min,125.0,
+Zone 1 | Bare Fibre Diameter | Max,125.18,
+Zone 1 | Furnace DegC Actual | Avg,2109.0,
+Zone 1 | Furnace DegC Actual | Min,2100.0,
+Zone 1 | Furnace DegC Actual | Max,2118.0,
+Zone 1 | Fibre Length | Avg,1.0,
+Zone 1 | Fibre Length | Min,0.0,
+Zone 1 | Fibre Length | Max,2.0,
+Zone 1 | UV 1 Intensity | Avg,82.39024390243902,
+Zone 1 | UV 1 Intensity | Min,82.0,
+Zone 1 | UV 1 Intensity | Max,82.8,
+Zone 1 | Furnace MFC1 Actual | Avg,1.173170731707317,
+Zone 1 | Furnace MFC1 Actual | Min,1.1,
+Zone 1 | Furnace MFC1 Actual | Max,1.25,
+Zone 1 | Good Fibre State | Avg,0.7560975609756098,
+Zone 1 | Good Fibre State | Min,0.0,
+Zone 1 | Good Fibre State | Max,1.0,
+Zone 1 | Trend Marker | Avg,0.024390243902439025,
+Zone 1 | Trend Marker | Min,0.0,
+Zone 1 | Trend Marker | Max,1.0,

@@ -1,5 +1,5 @@
 === AFTER DONE PRINT ===
-2026-03-03 01:05:56
+2026-05-15 14:38:33
 
-Wrote file: /Users/ohadformanair/PycharmProjects/Tower_work/hooks/P0trtewtewrewrF_1_PRINT.txt
-Sent to printer.
+Wrote file: hooks/TTTESTNEWF_1_PRINT.txt
+Printer handoff failed: ‏lp: ‎No such file or directory

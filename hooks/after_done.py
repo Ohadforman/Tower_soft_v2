@@ -3,6 +3,7 @@ import platform
 import subprocess
 from datetime import datetime
 import re
+from pathlib import Path
 
 import pandas as pd
 
@@ -44,6 +45,33 @@ def run_after_done_hook(
                 f.write(msg + "\n")
         except Exception:
             pass
+
+    def current_default_printer():
+        try:
+            result = subprocess.run(
+                ["lpstat", "-d"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            output = (result.stdout or "").strip()
+            if result.returncode == 0 and ":" in output:
+                return output.split(":", 1)[1].strip()
+        except Exception:
+            pass
+        try:
+            lpoptions_path = Path.home() / ".cups" / "lpoptions"
+            if lpoptions_path.exists():
+                for line in lpoptions_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    line = line.strip()
+                    if line.startswith("Default "):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            return parts[1].strip()
+        except Exception:
+            pass
+        return ""
 
     with open(log_path, "w", encoding="utf-8") as f:
         f.write("=== AFTER DONE PRINT ===\n")
@@ -99,7 +127,7 @@ def run_after_done_hook(
         tm_section.append((r["Parameter Name"], fmt(r["Value"], r["Units"])))
 
     # Good Zone Fibre Min/Max
-    gz_minmax = df[df["Parameter Name"].str.contains(r"Good Zone .*Fibre Length (Min|Max)", regex=True, na=False)]
+    gz_minmax = df[df["Parameter Name"].str.contains(r"Good Zone .*Fibre Length (?:Min|Max)", regex=True, na=False)]
     for _, r in gz_minmax.iterrows():
         tm_section.append((r["Parameter Name"], fmt(r["Value"], r["Units"])))
 
@@ -232,7 +260,29 @@ def run_after_done_hook(
     log(f"Wrote file: {out_file}")
 
     if platform.system().lower().startswith("darwin"):
-        subprocess.run(["lp", out_file], timeout=timeout_sec, check=False)
-        log("Sent to printer.")
+        default_printer = current_default_printer()
+        lp_command = ["lp"]
+        if default_printer:
+            lp_command.extend(["-d", default_printer])
+        lp_command.append(out_file)
+        result = subprocess.run(
+            lp_command,
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+            check=False,
+        )
+        stdout = (result.stdout or "").strip()
+        stderr = (result.stderr or "").strip()
+        if result.returncode == 0:
+            log(f"Sent to printer: {default_printer or 'system default'}")
+            if stdout:
+                log(stdout)
+            return True, f"Printed clean summary: {out_file}"
+        detail = stderr or stdout or "Unknown CUPS print error."
+        log(f"Printer handoff failed: {detail}")
+        if not default_printer:
+            return False, f"Snapshot created but no default printer is configured: {out_file}"
+        return False, f"Snapshot created but printer handoff failed ({default_printer}): {detail}"
 
-    return True, f"Printed clean summary: {out_file}"
+    return True, f"Created clean summary: {out_file}"

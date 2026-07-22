@@ -1,87 +1,82 @@
 Event Type,Start DateTime,End DateTime,Description,Recurrence
-Maintenance,2025-04-17 07:46:00,2025-04-17 18:15:00,Change coating,
-Maintenance,2025-05-08 07:52:00,2025-05-08 11:15:00,,
-Drawing,2025-05-09 07:52:00,2025-05-09 11:15:00,,
-Stop,2025-05-10 07:52:00,2025-05-12 11:15:00,,
-Management Event,2025-05-22 07:52:00,2025-05-22 11:15:00,,
-Drawing,2025-05-07 09:51:00,2025-05-07 10:51:00,ORDER #0 | Priority: Low | Fiber: PM tiger | Preform: T0876 | Length: 300.0 m | Spools: 1 | Notes: nan,
-Drawing,2026-01-29 09:52:00,2026-01-29 10:52:00,ORDER #0 | Priority: Low | Fiber: PM tiger | Preform: T0876 | Length: 300.0 m | Spools: 1 | Notes: nan,
-Maintenance,2026-01-23 11:06:00,2026-01-23 11:06:00,fsdff,
-Maintenance,2026-01-31 11:08:00,2026-01-31 16:00:00,,
-Stop,2026-03-26 11:09:00,2026-03-31 11:09:00,,
-Maintenance,2026-01-22 08:00:00,2026-01-22 16:00:00,WEELEND REGULAR MAINTANANCE,Weekly
-Maintenance,2026-01-23 11:20:00,2026-01-23 17:45:00,helo,
-Drawing,2026-01-23 08:00:00,2026-01-23 16:00:00,ORDER #5 | Priority: Low | Fiber:  | Preform:  | Length: 0.0 m | Spools: 1 | Notes: דגכגדכ,
-Drawing,2026-01-24 08:00:00,2026-01-24 16:00:00,ORDER #10 | Priority: Low | Fiber: 4324 | Preform: 3432 | Length: 0.0 m | Spools: 1,
-Drawing,2026-01-25 08:00:00,2026-01-25 16:00:00,ORDER #12 | Priority: Low | Fiber: fd111 | Preform: dsf11 | Length: 0.0 m | Spools: 1,
-Drawing,2026-01-24 08:00:00,2026-01-24 16:00:00,ORDER #13 | Priority: Low | Fiber: P088888 | Preform: P088888 | Length: 0.0 m | Spools: 1,
-Drawing,2026-01-25 08:00:00,2026-01-25 16:00:00,ORDER #0 | Priority: Low | Fiber: TMM | Preform: P0888 | Length: 0.0 m | Spools: 1 | Notes: sada,
-Drawing,2026-01-25 08:00:00,2026-01-25 16:00:00,ORDER #1 | Priority: Low | Fiber: TMM TIGER | Preform: T0678 | Length: 0.0 m | Spools: 1,
-Drawing,2026-01-30 08:00:00,2026-01-30 16:00:00,ORDER #2 | Priority: Low | Fiber: TMM | Preform: T0123 | Length: 0.0 m | Spools: 1,
-Drawing,2026-01-28 08:00:00,2026-01-28 16:00:00,ORDER #3 | Priority: Low | Fiber: LARA | Preform: P0111 | Length: 0.0 m | Spools: 1,
-Drawing,2026-01-25 08:00:00,2026-01-25 16:00:00,ORDER #4 | Priority: Low | Fiber:  | Preform:  | Length: 0.0 m | Spools: 1,
-Drawing,2026-01-26 08:00:00,2026-01-26 16:00:00,ORDER #5 | Priority: Low | Fiber: TMM | Preform: T071 | Length: 0.0 m | Spools: 1 | Notes: UV,
-Drawing,2026-01-27 08:00:00,2026-01-27 16:00:00,ORDER #5 | Priority: Low | Fiber: TMM | Preform: T071 | Length: 0.0 m | Spools: 1,
-Drawing,2026-01-29 08:00:00,2026-01-29 16:00:00,ORDER #6 | Priority: Low | Fiber: TAMAM | Preform: T072 | Length: 0.0 m | Spools: 1,
-Drawing,2026-02-02 08:00:00,2026-02-02 16:00:00,ORDER #7 | Priority: Low | Fiber: TMM | Preform: T010 | Length: 0.0 m | Spools: 1 | Notes: דגדג,
-Drawing,2026-01-31 08:00:00,2026-01-31 16:00:00,ORDER #8 | Priority: Low | Fiber: NEW SOF | Preform: P00000 | Length: 0.0 m | Spools: 1 | Notes: nothing to add,
-Drawing,2026-01-31 08:00:00,2026-01-31 16:00:00,ORDER #9 | Priority: Low | Fiber: TEST SOF | Preform: P00011 | Length: 0.0 m | Spools: 1 | Notes: not,
-Drawing,2026-02-03 08:00:00,2026-02-03 16:00:00,ORDER #10 | Priority: Low | Fiber: TEST | Preform: P012345 | Length: 0.0 m | Spools: 1 | Notes: sods,
-Drawing,2026-02-05 08:00:00,2026-02-05 16:00:00,ORDER #11 | Priority: Low | Fiber: TEST | Preform: P01 | Length: 500.0 m | Spools: 1 | Notes: Hello,
-Drawing,2026-01-31 08:00:00,2026-01-31 16:00:00,ORDER #12 | Priority: Low | Fiber: TMM | Preform: T777 | Required Length: 0.0 m | Good Zones Count: 1 | Notes: גדכגדכד,
-Drawing,2026-02-10 08:00:00,2026-02-10 16:00:00,ORDER #13 | Priority: Normal | Fiber: TAT | Preform: P0555 | Length:  m,
-Drawing,2026-02-01 08:00:00,2026-02-01 16:00:00,"ORDER #14 | Priority: Normal | Fiber: TMM | Preform: P0111 | Length:  m | Notes: Hi
-",
-Drawing,2026-02-02 08:00:00,2026-02-02 16:00:00,ORDER #15 | Priority: Normal | Fiber: TMM | Preform: T055555 | Required Length: 500.0 m | Good Zones Count: 1 | Notes: sad,
-Drawing,2026-02-02 08:00:00,2026-02-02 16:00:00,ORDER #16 | Priority: Normal | Fiber: TEST | Preform: TT111 | Required Length: 500.0 m | Good Zones Count: 1 | Notes: dfdsf,
-Drawing,2026-02-02 08:00:00,2026-02-02 16:00:00,ORDER #17 | Priority: Normal | Fiber: TMM | Preform: TT00 | Required Length: 500.0 m | Good Zones Count: 1 | Notes: Hello,
-Drawing,2026-02-02 08:00:00,2026-02-02 16:00:00,ORDER #18 | Priority: Normal | Fiber: TMM | Preform: TT999 | Required Length: 500.0 m | Good Zones Count: 1 | Notes: כגכגדכ,
-Drawing,2026-02-02 08:00:00,2026-02-02 16:00:00,ORDER #19 | Priority: Normal | Fiber: LARA | Preform: TT666 | Required Length: 500.0 m | Good Zones Count: 1 | Notes: sdasdsa,
-Drawing,2026-02-03 08:00:00,2026-02-03 16:00:00,ORDER #20 | Priority: Normal | Fiber: TMM | Preform: TT111 | Required Length: 500.0 m | Good Zones Count: 1 | Notes: seas,
-Drawing,2026-02-03 08:00:00,2026-02-03 16:00:00,ORDER #21 | Priority: Normal | Fiber: TAMAM - TIGER | Geometry: TIGER - PM | Preform: TT111 | Required Length: 0.02 m | Good Zones Count: 1 | Tiger Cut: 21.0% | Main Coat Temp: 36°C | Sec Coat Temp: 28°C | Notes: ITS A TEST,
-Drawing,2026-02-03 08:00:00,2026-02-03 16:00:00,ORDER #22 | Priority: Normal | Fiber: TAMAM - TIGER | Geometry: TIGER - PM | Preform: TTT | Required Length: 50.0 m | Good Zones Count: 1 | Tiger Cut: 21.0% | Main Coat Temp: 36°C | Sec Coat Temp: 28°C | Notes: dsfsdfsd,
-Drawing,2026-02-03 08:00:00,2026-02-03 16:00:00,ORDER #23 | Priority: Normal | Fiber: TAMAM - TIGER | Geometry: TIGER - PM | Preform: RRR | Required Length: 0.02 m | Good Zones Count: 1 | Tiger Cut: 21.0% | Main Coat Temp: 36°C | Sec Coat Temp: 28°C,
-Drawing,2026-02-03 08:00:00,2026-02-03 16:00:00,ORDER #25 | Priority: Normal | Fiber: LARA - ELOP | Geometry: Octagonal | Preform: BBB | Required Length: 500.0 m | Good Zones Count: 1 | Oct F2F: 26.00 mm | Main Coat Temp: 28°C | Sec Coat Temp: 28°C | Notes: T,
-Drawing,2026-02-03 08:00:00,2026-02-03 16:00:00,ORDER #26 | Priority: Normal | Fiber: LARA - ELOP | Geometry: Octagonal | Preform: QQQ | Required Length: 500.0 m | Good Zones Count: 1 | Oct F2F: 26.00 mm | Main Coat Temp: 28°C | Sec Coat Temp: 28°C,
-Drawing,2026-02-03 08:00:00,2026-02-03 16:00:00,ORDER #27 | Priority: Normal | Fiber: TAMAM - TIGER | Geometry: TIGER - PM | Preform: nnn | Required Length: 0.01 m | Good Zones Count: 1 | Tiger Cut: 21.0% | Main Coat Temp: 36°C | Sec Coat Temp: 28°C | Notes: dfs,
-Drawing,2026-02-03 08:00:00,2026-02-03 16:00:00,ORDER #28 | Priority: Normal | Fiber: LARA - ELOP | Geometry: Octagonal | Preform: LLL | Required Length: 500.0 m | Good Zones Count: 1 | Oct F2F: 26.00 mm | Main Coat Temp: 28°C | Sec Coat Temp: 28°C,
-Drawing,2026-02-03 08:00:00,2026-02-03 16:00:00,ORDER #29 | Priority: Normal | Fiber: CIVAN - LARA | Geometry: PANDA - PM | Preform: CCC | Required Length: 500.0 m | Good Zones Count: 1 | Main Coat Temp: 28°C | Sec Coat Temp: 28°C,
-Drawing,2026-02-03 08:00:00,2026-02-03 16:00:00,ORDER #30 | Priority: Normal | Fiber: CIVAN - LARA | Geometry: PANDA - PM | Preform: YYY | Required Length: 0.03 m | Good Zones Count: 1 | Main Coat Temp: 28°C | Sec Coat Temp: 28°C,
-Drawing,2026-02-03 08:00:00,2026-02-03 16:00:00,ORDER #31 | Priority: Normal | Fiber: LARA - ELOP | Geometry: Octagonal | Preform: OOOO | Required Length: 0.02 m | Good Zones Count: 1 | Oct F2F: 28.00 mm | Main Coat Temp: 28°C | Sec Coat Temp: 28°C,
-Drawing,2026-02-03 08:00:00,2026-02-03 16:00:00,ORDER #32 | Priority: Normal | Fiber: LARA - ELOP | Geometry: Octagonal | Preform: EEE | Required Length: 0.03 m | Good Zones Count: 1 | Oct F2F: 28.00 mm | Main Coat Temp: 28°C | Sec Coat Temp: 28°C,
-Drawing,2026-02-03 08:00:00,2026-02-03 16:00:00,ORDER #0 | Priority: Normal | Fiber: LARA - ELOP | Geometry: Octagonal | Preform: P0ttt | Required Length: 0.03 m | Good Zones Count: 1 | Oct F2F: 28.00 mm | Main Coat Temp: 28°C | Sec Coat Temp: 28°C | Notes: MAKT IS UV TEST,
-Drawing,2026-02-03 08:00:00,2026-02-03 16:00:00,ORDER #1 | Priority: Normal | Fiber: TAMAM - TIGER | Geometry: TIGER - PM | Preform: TTT | Required Length: 0.02 m | Good Zones Count: 1 | Tiger Cut: 21.0% | Main Coat Temp: 36°C | Sec Coat Temp: 28°C | Notes: גדשכגדשכ,
-Drawing,2026-02-04 08:00:00,2026-02-04 16:00:00,ORDER #2 | Priority: Normal | Fiber: LARA - ELOP | Geometry: Octagonal | Preform: PPP | Required Length: 0.01 m | Good Zones Count: 1 | Oct F2F: 28.00 mm | Main Coat Temp: 28°C | Sec Coat Temp: 28°C,
-Maintenance,2026-02-08 04:05:00,2026-02-08 13:30:00,Change coat,
-Drawing,2026-02-05 08:00:00,2026-02-05 16:00:00,ORDER #3 | Priority: Normal | Fiber: LARA - ELOP | Geometry: Octagonal | Preform: TTT | Required Length: 0.02 m | Good Zones Count: 1 | Diameters: Fiber 400 µm | Coat1 560 µm | Coat2 650 µm | Oct F2F: 28.00 mm | Main Coat Temp: 28°C | Sec Coat Temp: 28°C,
-Drawing,2026-02-05 08:00:00,2026-02-05 16:00:00,ORDER #4 | Priority: Normal | Fiber: TAMAM - TIGER | Geometry: TIGER - PM | Preform: RERER | Required Length: 0.01 m | Good Zones Count: 1 | Diameters: Fiber 40 ± 1 µm | Coat1 80 ± 5 µm | Coat2 110 ± 15 µm | Tiger Cut: 21.0% | Main Coat Temp: 36°C | Sec Coat Temp: 28°C,
-Drawing,2026-02-05 08:00:00,2026-02-05 16:00:00,ORDER #5 | Priority: Normal | Fiber: LARA - ELOP | Geometry: Octagonal | Preform: RE | Required Length: 0.02 m | Good Zones Count: 1 | Diameters: Fiber 400 µm | Coat1 560 µm | Coat2 650 µm | Oct F2F: 28.00 mm | Main Coat Temp: 28°C | Sec Coat Temp: 28°C,
-Drawing,2026-02-05 08:00:00,2026-02-05 16:00:00,ORDER #6 | Priority: Normal | Fiber: LARA - ELOP | Geometry: Octagonal | Preform: HHH | Required Length: 0.01 m | Good Zones Count: 1 | Diameters: Fiber 400 µm | Coat1 560 µm | Coat2 650 µm | Oct F2F: 28.00 mm | Main Coat Temp: 28°C | Sec Coat Temp: 28°C | Notes: H,
-Drawing,2026-02-06 08:00:00,2026-02-06 16:00:00,ORDER #7 | Priority: Normal | Fiber: TAMAM - TIGER | Geometry: TIGER - PM | Preform: uuu | Required Length: 0.01 m | Good Zones Count: 1 | Diameters: Fiber 40 ± 1 µm | Coat1 80 ± 5 µm | Coat2 110 ± 15 µm | Tiger Cut: 21.0% | Main Coat Temp: 36°C | Sec Coat Temp: 28°C | Notes: u,
-Drawing,2026-02-06 08:00:00,2026-02-06 16:00:00,ORDER #8 | Priority: Normal | Fiber: CIVAN - LARA | Geometry: PANDA - PM | Preform: AAA | Required Length: 0.02 m | Good Zones Count: 1 | Diameters: Fiber 400 ± 15 µm | Coat1 560 ± 15 µm | Coat2 670 ± 15 µm | Main Coat Temp: 28°C | Sec Coat Temp: 28°C | Notes: A,
-Drawing,2026-02-06 08:00:00,2026-02-06 16:00:00,ORDER #9 | Priority: Normal | Fiber: ELOP - 130/10 | Geometry: STEP INDEX | Preform: ewrerwq | Required Length: 0.01 m | Good Zones Count: 1 | Diameters: Fiber 130 ± 1 µm | Coat1 190 ± 5 µm | Coat2 245 ± 15 µm | Main Coat Temp: 25°C | Sec Coat Temp: 25°C | Notes: ewer,
-Drawing,2026-02-06 08:00:00,2026-02-06 16:00:00,ORDER #10 | Priority: Normal | Fiber: LARA - ELOP | Geometry: Octagonal | Preform: sadfsafd | Required Length: 0.01 m | Good Zones Count: 1 | Diameters: Fiber 400 µm | Coat1 560 µm | Coat2 650 µm | Oct F2F: 28.00 mm | Main Coat Temp: 28°C | Sec Coat Temp: 28°C | Notes: sdfsad,
-Maintenance,2026-02-06 11:01:00,2026-02-06 11:01:00,dsfds,
-Maintenance,2026-02-10 11:01:00,2026-02-11 11:01:00,dsfds,
-Drawing,2026-02-06 08:00:00,2026-02-06 16:00:00,ORDER #11 | Priority: Normal | Fiber: LARA - ELOP | Geometry: Octagonal | Preform: ds | Required Length: 0.01 m | Good Zones Count: 1 | Diameters: Fiber 400 µm | Coat1 560 µm | Coat2 650 µm | Oct F2F: 28.00 mm | Main Coat Temp: 28°C | Sec Coat Temp: 28°C | Notes: sd,
-Drawing,2026-02-06 08:00:00,2026-02-06 16:00:00,ORDER #12 | Priority: Normal | Fiber: TAMAM - TIGER | Geometry: TIGER - PM | Preform: fdf | Required Length: 0.01 m | Good Zones Count: 1 | Diameters: Fiber 40 ± 1 µm | Coat1 80 ± 5 µm | Coat2 110 ± 15 µm | Tiger Cut: 21.0% | Main Coat Temp: 36°C | Sec Coat Temp: 28°C | Notes: dfdf,
-Drawing,2026-02-06 08:00:00,2026-02-06 16:00:00,ORDER #13 | Priority: Normal | Fiber: CIVAN - LARA | Geometry: PANDA - PM | Preform: 23 | Required Length: 0.01 m | Good Zones Count: 1 | Diameters: Fiber 400 ± 15 µm | Coat1 560 ± 15 µm | Coat2 670 ± 15 µm | Main Coat Temp: 28°C | Sec Coat Temp: 28°C | Notes: 213,
-Drawing,2026-02-06 08:00:00,2026-02-06 16:00:00,ORDER #14 | Priority: Normal | Fiber: TAMAM - TIGER | Geometry: TIGER - PM | Preform: RERERERER | Required Length: 0.01 m | Good Zones Count: 1 | Diameters: Fiber 40 ± 1 µm | Coat1 80 ± 5 µm | Coat2 110 ± 15 µm | Tiger Cut: 21.0% | Main Coat Temp: 36°C | Sec Coat Temp: 28°C | Notes: RERE,
-Drawing,2026-02-07 08:00:00,2026-02-07 16:00:00,ORDER #15 | Priority: Normal | Fiber: TAMAM - TIGER | Geometry: TIGER - PM | Preform: TGTGTG | Required Length: 0.02 m | Good Zones Count: 1 | Diameters: Fiber 40 ± 1 µm | Coat1 80 ± 5 µm | Coat2 110 ± 15 µm | Tiger Cut: 21.0% | Main Coat Temp: 36°C | Sec Coat Temp: 28°C | Notes: TG,
-Drawing,2026-02-08 08:00:00,2026-02-08 16:00:00,ORDER #16 | Priority: Normal | Fiber: TAMAM - TIGER | Geometry: TIGER - PM | Preform: TIFER | Required Length: 0.01 m | Good Zones Count: 1 | Diameters: Fiber 40 ± 1 µm | Coat1 80 ± 5 µm | Coat2 110 ± 15 µm | Tiger Cut: 21.0% | Main Coat Temp: 36°C | Sec Coat Temp: 28°C | Notes: SD,
-Drawing,2026-02-08 08:00:00,2026-02-08 16:00:00,ORDER #17 | Priority: Normal | Fiber: LARA - ELOP | Geometry: Octagonal | Preform: P0555 | Required Length: 0.01 m | Good Zones Count: 1 | Diameters: Fiber 400 µm | Coat1 560 µm | Coat2 650 µm | Oct F2F: 28.00 mm | Main Coat Temp: 28°C | Sec Coat Temp: 28°C | Notes: df,
-Drawing,2026-02-09 08:00:00,2026-02-09 16:00:00,ORDER #18 | Priority: Normal | Fiber: LARA - ELOP | Geometry: Octagonal | Preform: p0999 | Required Length: 0.01 m | Good Zones Count: 1 | Diameters: Fiber 400 µm | Coat1 560 µm | Coat2 650 µm | Oct F2F: 28.00 mm | Main Coat Temp: 28°C | Sec Coat Temp: 28°C,
-Drawing,2026-02-22 08:00:00,2026-02-22 16:00:00,ORDER #19 | Priority: Normal | Fiber: TAMAM - TIGER | Geometry: TIGER - PM | Preform: T0test | Required Length: 0.01 m | Good Zones Count: 1 | Diameters: Fiber 40 ± 1 µm | Coat1 80 ± 5 µm | Coat2 110 ± 15 µm | Tiger Cut: 21.0% | Main Coat Temp: 36°C | Sec Coat Temp: 28°C | Notes: hello,
-Drawing,2026-02-24 08:00:00,2026-02-24 16:00:00,ORDER #20 | Priority: Normal | Fiber: LARA - ELOP | Geometry: Octagonal | Preform: P0TESTCSV | Required Length: 0.10999999999999999 m | Good Zones Count: 1 | Diameters: Fiber 400 µm | Coat1 560 µm | Coat2 650 µm | Oct F2F: 28.00 mm | Main Coat Temp: 28°C | Sec Coat Temp: 28°C,
-Drawing,2026-02-24 08:00:00,2026-02-24 16:00:00,ORDER #21 | Priority: Normal | Fiber: CIVAN - LARA | Geometry: PANDA - PM | Preform: P0testcsv2 | Required Length: 0.01 m | Good Zones Count: 1 | Diameters: Fiber 400 ± 15 µm | Coat1 560 ± 15 µm | Coat2 670 ± 15 µm | Main Coat Temp: 28°C | Sec Coat Temp: 28°C,
-Drawing,2026-02-24 08:00:00,2026-02-24 16:00:00,ORDER #22 | Priority: Normal | Fiber: CIVAN - LARA | Geometry: PANDA - PM | Preform: P0testcsv3 | Required Length: 0.02 m | Good Zones Count: 1 | Diameters: Fiber 0.02 ± 0.2 µm | Coat1 0.02 ± 0.2 µm | Coat2 0.02 ± 0.2 µm | Main Coat Temp: 26°C | Sec Coat Temp: 26°C,
-Drawing,2026-02-24 08:00:00,2026-02-24 16:00:00,ORDER #23 | Priority: Normal | Fiber: CIVAN - LARA | Geometry: Octagonal | Preform: P0testcsv5 | Required Length: 0.03 m | Good Zones Count: 1 | Diameters: Fiber 400 ± 15 µm | Coat1 560 ± 15 µm | Coat2 670 ± 15 µm | Oct F2F: 27.00 mm | Main Coat Temp: 28°C | Sec Coat Temp: 28°C | Notes: UV test,
-Drawing,2026-02-24 08:00:00,2026-02-24 16:00:00,ORDER #24 | Priority: Normal | Fiber: TAMAM - TIGER | Geometry: TIGER - PM | Preform: TTESTCSV6 | Required Length: 0.02 m | Good Zones Count: 1 | Diameters: Fiber 40 ± 1 µm | Coat1 80 ± 5 µm | Coat2 110 ± 15 µm | Tiger Cut: 21.0% | Main Coat Temp: 36°C | Sec Coat Temp: 28°C | Notes: דג,
-Drawing,2026-02-24 08:00:00,2026-02-24 16:00:00,ORDER #25 | Priority: Normal | Fiber: LARA - ELOP | Geometry: Octagonal | Preform: P0testcsv8 | Required Length: 0.01 m | Good Zones Count: 1 | Diameters: Fiber 400 µm | Coat1 560 µm | Coat2 650 µm | Oct F2F: 28.00 mm | Main Coat Temp: 28°C | Sec Coat Temp: 28°C,
-Drawing,2026-02-24 08:00:00,2026-02-24 16:00:00,ORDER #26 | Priority: Normal | Fiber: TAMAM - TIGER | Geometry: TIGER - PM | Preform: TCSVTEST | Required Length: 0.03 m | Good Zones Count: 1 | Diameters: Fiber 40 ± 1 µm | Coat1 80 ± 5 µm | Coat2 110 ± 15 µm | Tiger Cut: 21.0% | Main Coat Temp: 36°C | Sec Coat Temp: 28°C | Notes: did,
-Drawing,2026-02-24 08:00:00,2026-02-24 16:00:00,ORDER #27 | Priority: Normal | Fiber: LARA - ELOP | Geometry: Octagonal | Preform: P0TESTCSVfiN | Required Length: 0.03 m | Good Zones Count: 1 | Diameters: Fiber 400 µm | Coat1 560 µm | Coat2 650 µm | Oct F2F: 28.00 mm | Main Coat Temp: 28°C | Sec Coat Temp: 28°C | Notes: DS,
-Drawing,2026-02-24 08:00:00,2026-02-24 16:00:00,ORDER #28 | Priority: Normal | Fiber: TAMAM - TIGER | Geometry: TIGER - PM | Preform: TTTTESTCSV | Required Length: 0.02 m | Good Zones Count: 1 | Diameters: Fiber 40 ± 1 µm | Coat1 80 ± 5 µm | Coat2 110 ± 15 µm | Tiger Cut: 21.0% | Main Coat Temp: 36°C | Sec Coat Temp: 28°C,
-Drawing,2026-02-25 08:00:00,2026-02-25 16:00:00,ORDER #29 | Priority: Normal | Fiber: TAMAM - TIGER | Geometry: TIGER - PM | Preform: TtestNEWCSV | Required Length: 0.02 m | Good Zones Count: 1 | Diameters: Fiber 40 ± 1 µm | Coat1 80 ± 5 µm | Coat2 110 ± 15 µm | Tiger Cut: 21.0% | Main Coat Temp: 36°C | Sec Coat Temp: 28°C,
-Drawing,2026-02-25 08:00:00,2026-02-25 16:00:00,ORDER #30 | Priority: Normal | Fiber: TAMAM - TIGER | Geometry: ROUND | Preform: TEST1111 | Required Length: 0.02 m | Good Zones Count: 1 | Diameters: Fiber 40 ± 1 µm | Coat1 80 ± 5 µm | Coat2 110 ± 15 µm | Main Coat Temp: 36°C | Sec Coat Temp: 28°C | Notes: SD,
-Drawing,2026-03-03 08:00:00,2026-03-03 16:00:00,ORDER #5 | Priority: Normal | Fiber: TAMAM - TIGER | Geometry: TIGER - PM | Preform: TTTESTNEW | Required Length: 0.01 m | Good Zones Count: 1 | Diameters: Fiber 40 ± 1 µm | Coat1 80 ± 5 µm | Coat2 110 ± 15 µm | Tiger Cut: 21.0% | Main Coat Temp: 36°C | Sec Coat Temp: 28°C | Notes: sa,
-Drawing,2026-03-30 08:00:00,2026-03-30 16:00:00,ORDER #6 | Priority: Normal | Fiber: LARA - ELOP | Geometry: Octagonal | Preform: P0111 | Required Length: 500.0 m | Good Zones Count: 1 | Diameters: Fiber 400 µm | Coat1 560 µm | Coat2 650 µm | Oct F2F: 28.00 mm | Main Coat Temp: 28°C | Sec Coat Temp: 28°C | Notes: Hello,None
+Maintenance,2026-05-20T07:30:00,2026-05-20T09:00:00,Maintenance scheduled: 63mm Furnace System — Monthly: inspect bottom doors for distortion/damage; replace if needed (Task ID: FUR-MNT-006).,none
+Maintenance,2026-05-20T07:30:00,2026-05-20T09:00:00,Maintenance scheduled: 63mm Furnace System — Every 6 months OR 3000 operating hours: tower alignment check using plumb line (Task ID: FUR-MNT-010).,none
+Drawing,2026-05-20 08:00:00,2026-05-20 15:41:00,ORDER #19 | Priority: Normal | Fiber: TAMAM - TIGER | Geometry: TIGER - PM | Preform: TE000 | Required Length: 500.0 m | Good Zones Count: 1 | Diameters: Fiber 40 ± 0.6 µm | Coat1 83 ± 1 µm | Coat2 105 ± 5 µm | Tiger Cut: 21.0% | Main Coat Temp: 36°C | Sec Coat Temp: 28°C | Notes: עברית בודקים פה,None
+Drawing,2026-05-21 09:01:00,2026-05-21 10:01:00,Network smoke schedule 1,none
+Maintenance,2026-05-22 09:02:00,2026-05-22 10:02:00,Network smoke schedule 2,none
+Maintenance,2026-05-20 09:00:00,2026-05-20 10:00:00,Network smoke schedule 0,none
+Drawing,2026-05-25 09:05:00,2026-05-25 10:05:00,Network smoke schedule 5,none
+Maintenance,2026-05-24 09:04:00,2026-05-24 10:04:00,Network smoke schedule 4,none
+Drawing,2026-05-27 09:07:00,2026-05-27 10:07:00,Network smoke schedule 7,none
+Maintenance,2026-05-26 09:06:00,2026-05-26 10:06:00,Network smoke schedule 6,none
+Drawing,2026-05-23 09:03:00,2026-05-23 10:03:00,Network smoke schedule 3,none
+Drawing,2026-05-21 09:01:00,2026-05-21 10:01:00,Network smoke schedule 1,none
+Drawing,2026-05-23 09:03:00,2026-05-23 10:03:00,Network smoke schedule 3,none
+Maintenance,2026-05-22 09:02:00,2026-05-22 10:02:00,Network smoke schedule 2,none
+Maintenance,2026-05-24 09:04:00,2026-05-24 10:04:00,Network smoke schedule 4,none
+Maintenance,2026-05-20 09:00:00,2026-05-20 10:00:00,Network smoke schedule 0,none
+Drawing,2026-05-27 09:07:00,2026-05-27 10:07:00,Network smoke schedule 7,none
+Maintenance,2026-05-26 09:06:00,2026-05-26 10:06:00,Network smoke schedule 6,none
+Drawing,2026-05-25 09:05:00,2026-05-25 10:05:00,Network smoke schedule 5,none
+Maintenance,2026-05-22 09:02:00,2026-05-22 10:02:00,Network smoke schedule 2,none
+Drawing,2026-05-23 09:03:00,2026-05-23 10:03:00,Network smoke schedule 3,none
+Drawing,2026-05-21 09:01:00,2026-05-21 10:01:00,Network smoke schedule 1,none
+Maintenance,2026-05-20 09:00:00,2026-05-20 10:00:00,Network smoke schedule 0,none
+Drawing,2026-05-25 09:05:00,2026-05-25 10:05:00,Network smoke schedule 5,none
+Maintenance,2026-05-24 09:04:00,2026-05-24 10:04:00,Network smoke schedule 4,none
+Maintenance,2026-05-26 09:06:00,2026-05-26 10:06:00,Network smoke schedule 6,none
+Drawing,2026-05-27 09:07:00,2026-05-27 10:07:00,Network smoke schedule 7,none
+Drawing,2026-05-22 09:30:00,2026-05-22 11:05:00,ORDER #20 | Priority: Normal | Fiber: Network Smoke Project 204843 | Geometry: Round | Preform: NETQ9843 | Required Length: 1100.0 m | Good Zones Count: 1 | Diameters: Fiber 125 ± 1 µm | Coat1 245 ± 2 µm | Coat2 400 ± 3 µm | Main Coat Temp: 62°C | Sec Coat Temp: 58°C | Notes: Network scheduled-start smoke,None
+Maintenance,2026-05-20 09:00:00,2026-05-20 10:00:00,Network smoke schedule 0,none
+Maintenance,2026-05-26 09:06:00,2026-05-26 10:06:00,Network smoke schedule 6,none
+Drawing,2026-05-23 09:03:00,2026-05-23 10:03:00,Network smoke schedule 3,none
+Drawing,2026-05-21 09:01:00,2026-05-21 10:01:00,Network smoke schedule 1,none
+Maintenance,2026-05-24 09:04:00,2026-05-24 10:04:00,Network smoke schedule 4,none
+Drawing,2026-05-27 09:07:00,2026-05-27 10:07:00,Network smoke schedule 7,none
+Drawing,2026-05-25 09:05:00,2026-05-25 10:05:00,Network smoke schedule 5,none
+Maintenance,2026-05-22 09:02:00,2026-05-22 10:02:00,Network smoke schedule 2,none
+Drawing,2026-05-22 09:30:00,2026-05-22 11:05:00,ORDER #21 | Priority: Normal | Fiber: Network Smoke Project 210123 | Geometry: Round | Preform: NETQ9123 | Required Length: 1100.0 m | Good Zones Count: 1 | Diameters: Fiber 125 ± 1 µm | Coat1 245 ± 2 µm | Coat2 400 ± 3 µm | Main Coat Temp: 62°C | Sec Coat Temp: 58°C | Notes: Network scheduled-start smoke,None
+Drawing,2026-05-23 09:03:00,2026-05-23 10:03:00,Network smoke schedule 3,none
+Maintenance,2026-05-22 09:02:00,2026-05-22 10:02:00,Network smoke schedule 2,none
+Drawing,2026-05-27 09:07:00,2026-05-27 10:07:00,Network smoke schedule 7,none
+Maintenance,2026-05-24 09:04:00,2026-05-24 10:04:00,Network smoke schedule 4,none
+Maintenance,2026-05-20 09:00:00,2026-05-20 10:00:00,Network smoke schedule 0,none
+Drawing,2026-05-21 09:01:00,2026-05-21 10:01:00,Network smoke schedule 1,none
+Maintenance,2026-05-26 09:06:00,2026-05-26 10:06:00,Network smoke schedule 6,none
+Drawing,2026-05-25 09:05:00,2026-05-25 10:05:00,Network smoke schedule 5,none
+Drawing,2026-05-22 09:30:00,2026-05-22 11:05:00,ORDER #22 | Priority: Normal | Fiber: Network Smoke Project 220329 | Geometry: Round | Preform: NETQ9329 | Required Length: 1100.0 m | Good Zones Count: 1 | Diameters: Fiber 125 ± 1 µm | Coat1 245 ± 2 µm | Coat2 400 ± 3 µm | Main Coat Temp: 62°C | Sec Coat Temp: 58°C | Notes: Network scheduled-start smoke,None
+Drawing,2026-05-21 09:01:00,2026-05-21 10:01:00,Network smoke schedule 1,none
+Maintenance,2026-05-22 09:02:00,2026-05-22 10:02:00,Network smoke schedule 2,none
+Maintenance,2026-05-20 09:00:00,2026-05-20 10:00:00,Network smoke schedule 0,none
+Maintenance,2026-05-26 09:06:00,2026-05-26 10:06:00,Network smoke schedule 6,none
+Drawing,2026-05-23 09:03:00,2026-05-23 10:03:00,Network smoke schedule 3,none
+Maintenance,2026-05-24 09:04:00,2026-05-24 10:04:00,Network smoke schedule 4,none
+Drawing,2026-05-25 09:05:00,2026-05-25 10:05:00,Network smoke schedule 5,none
+Drawing,2026-05-27 09:07:00,2026-05-27 10:07:00,Network smoke schedule 7,none
+Drawing,2026-05-22 09:30:00,2026-05-22 11:05:00,ORDER #24 | Priority: Normal | Fiber: Network Smoke Project 003054 | Geometry: Round | Preform: NETQ9054 | Required Length: 1100.0 m | Good Zones Count: 1 | Diameters: Fiber 125 ± 1 µm | Coat1 245 ± 2 µm | Coat2 400 ± 3 µm | Main Coat Temp: 62°C | Sec Coat Temp: 58°C | Notes: Network scheduled-start smoke,None
+Maintenance,2026-05-22 09:02:00,2026-05-22 10:02:00,Network smoke schedule 2,none
+Maintenance,2026-05-20 09:00:00,2026-05-20 10:00:00,Network smoke schedule 0,none
+Drawing,2026-05-21 09:01:00,2026-05-21 10:01:00,Network smoke schedule 1,none
+Drawing,2026-05-23 09:03:00,2026-05-23 10:03:00,Network smoke schedule 3,none
+Maintenance,2026-05-26 09:06:00,2026-05-26 10:06:00,Network smoke schedule 6,none
+Drawing,2026-05-25 09:05:00,2026-05-25 10:05:00,Network smoke schedule 5,none
+Drawing,2026-05-27 09:07:00,2026-05-27 10:07:00,Network smoke schedule 7,none
+Maintenance,2026-05-24 09:04:00,2026-05-24 10:04:00,Network smoke schedule 4,none
+Drawing,2026-05-22 09:30:00,2026-05-22 11:05:00,ORDER #25 | Priority: Normal | Fiber: Network Smoke Project 132116 | Geometry: Round | Preform: NETQ9116 | Required Length: 1100.0 m | Good Zones Count: 1 | Diameters: Fiber 125 ± 1 µm | Coat1 245 ± 2 µm | Coat2 400 ± 3 µm | Main Coat Temp: 62°C | Sec Coat Temp: 58°C | Notes: Network scheduled-start smoke,None
+Drawing,2026-05-28 13:58:00,2026-05-28 15:33:00,ORDER #26 | Priority: Normal | Fiber: Full Flow Smoke 20260528134355 | Geometry: ROUND | Preform: FLOWP4355 | Required Length: 1250.0 m | Good Zones Count: 2 | Diameters: Fiber 125 ± 1 µm | Coat1 245 ± 2 µm | Coat2 400 ± 3 µm | Main Coat Temp: 62°C | Sec Coat Temp: 58°C | Notes: Full flow test 20260528134355,None
+Drawing,2026-05-28 14:30:00,2026-05-28 16:05:00,ORDER #27 | Priority: Normal | Fiber: Full Flow Smoke 20260528141555 | Geometry: ROUND | Preform: FLOWP1555 | Required Length: 1250.0 m | Good Zones Count: 2 | Diameters: Fiber 125 ± 1 µm | Coat1 245 ± 2 µm | Coat2 400 ± 3 µm | Main Coat Temp: 62°C | Sec Coat Temp: 58°C | Notes: Full flow test 20260528141555,None
+Maintenance,2026-05-28 14:36:06,2026-05-28 15:06:06,Maintenance scheduled: General — Weekly full flow 20260528141555 (Task ID: G-MNT-003).,weekly
+Drawing,2026-05-28 14:39:00,2026-05-28 16:14:00,ORDER #28 | Priority: Normal | Fiber: Full Flow Smoke 20260528142423 | Geometry: ROUND | Preform: FLOWP2423 | Required Length: 1250.0 m | Good Zones Count: 2 | Diameters: Fiber 125 ± 1 µm | Coat1 245 ± 2 µm | Coat2 400 ± 3 µm | Main Coat Temp: 62°C | Sec Coat Temp: 58°C | Notes: Full flow test 20260528142423,None
+Maintenance,2026-05-24 14:44:33,2026-05-24 15:14:33,Maintenance scheduled: General — Weekly full flow 20260528142423 (Task ID: G-MNT-004).,weekly
+Drawing,2026-05-28 14:44:00,2026-05-28 16:19:00,ORDER #29 | Priority: Normal | Fiber: Full Flow Smoke 20260528142936 | Geometry: ROUND | Preform: FLOWP2936 | Required Length: 1250.0 m | Good Zones Count: 2 | Diameters: Fiber 125 ± 1 µm | Coat1 245 ± 2 µm | Coat2 400 ± 3 µm | Main Coat Temp: 62°C | Sec Coat Temp: 58°C | Notes: Full flow test 20260528142936,None
+Maintenance,2026-05-24 14:49:51,2026-05-24 15:19:51,Maintenance scheduled: General — Weekly full flow 20260528142936 (Task ID: G-MNT-005).,weekly
+Drawing,2026-05-28 15:02:00,2026-05-28 16:37:00,ORDER #30 | Priority: Normal | Fiber: Full Flow Smoke 20260528144725 | Geometry: ROUND | Preform: FLOWP4725 | Required Length: 1250.0 m | Good Zones Count: 2 | Diameters: Fiber 125 ± 1 µm | Coat1 245 ± 2 µm | Coat2 400 ± 3 µm | Main Coat Temp: 62°C | Sec Coat Temp: 58°C | Notes: Full flow test 20260528144725,None
+Maintenance,2026-05-24 15:07:37,2026-05-24 15:37:37,Maintenance scheduled: Full Flow Rig — Weekly full flow 20260528144725 (Task ID: FFR-MNT-001).,weekly
+Drawing,2026-05-28 15:15:00,2026-05-28 16:50:00,ORDER #31 | Priority: Normal | Fiber: Full Flow Smoke 20260528150023 | Geometry: ROUND | Preform: FLOWP0023 | Required Length: 1250.0 m | Good Zones Count: 2 | Diameters: Fiber 125 ± 1 µm | Coat1 245 ± 2 µm | Coat2 400 ± 3 µm | Main Coat Temp: 62°C | Sec Coat Temp: 58°C | Notes: Full flow test 20260528150023,None
+Maintenance,2026-05-24 15:20:44,2026-05-24 15:50:44,Maintenance scheduled: Full Flow Rig — Weekly full flow 20260528150023 (Task ID: FFR-MNT-002).,weekly
+Drawing,2026-05-28 15:35:00,2026-05-28 17:10:00,ORDER #32 | Priority: Normal | Fiber: Full Flow Smoke 20260528152016 | Geometry: ROUND | Preform: FLOWP2016 | Required Length: 1250.0 m | Good Zones Count: 2 | Diameters: Fiber 125 ± 1 µm | Coat1 245 ± 2 µm | Coat2 400 ± 3 µm | Main Coat Temp: 62°C | Sec Coat Temp: 58°C | Notes: Full flow test 20260528152016,None
+Maintenance,2026-06-04 15:40:37,2026-06-04 16:10:37,Maintenance scheduled: Full Flow Rig — Weekly full flow 20260528152016 (Task ID: FFR-MNT-003).,weekly
+Drawing,2026-05-28 15:45:00,2026-05-28 17:20:00,ORDER #33 | Priority: Normal | Fiber: Full Flow Smoke 20260528153013 | Geometry: ROUND | Preform: FLOWP3013 | Required Length: 1250.0 m | Good Zones Count: 2 | Diameters: Fiber 125 ± 1 µm | Coat1 245 ± 2 µm | Coat2 400 ± 3 µm | Main Coat Temp: 62°C | Sec Coat Temp: 58°C | Notes: Full flow test 20260528153013,None
+Maintenance,2026-06-04 15:50:25,2026-06-04 16:20:25,Maintenance scheduled: Full Flow Rig — Weekly full flow 20260528153013 (Task ID: FFR-MNT-004).,weekly
+Drawing,2026-05-28 15:55:00,2026-05-28 17:30:00,ORDER #34 | Priority: Normal | Fiber: Full Flow Smoke 20260528154045 | Geometry: ROUND | Preform: FLOWP4045 | Required Length: 1250.0 m | Good Zones Count: 2 | Diameters: Fiber 125 ± 1 µm | Coat1 245 ± 2 µm | Coat2 400 ± 3 µm | Main Coat Temp: 62°C | Sec Coat Temp: 58°C | Notes: Full flow test 20260528154045,None
+Maintenance,2026-06-04 16:00:56,2026-06-04 16:30:56,Maintenance scheduled: Full Flow Rig — Weekly full flow 20260528154045 (Task ID: FFR-MNT-005).,weekly

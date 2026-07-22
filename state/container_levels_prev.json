@@ -1,18 +1,38 @@
 {
+  "_feed_signature": "{\"A_level\":0.0,\"A_type\":\"\",\"B_level\":0.0,\"B_type\":\"\",\"C_level\":0.0,\"C_type\":\"\",\"D_level\":0.0,\"D_type\":\"\",\"mode\":\"stale\",\"timestamp\":\"18/05/2026 17:42\"}",
+  "_updated_at": "18/05/2026 17:42",
+  "containers": {
     "A": {
-        "level": 2.4,
-        "type": "DP-1032"
+      "level": 0.0,
+      "fill_percent": 0.0,
+      "raw_level": 0.0,
+      "raw_fill_percent": 0.0,
+      "type": "DP-1032",
+      "updated_at": "18/05/2026 17:42"
     },
     "B": {
-        "level": 2.1,
-        "type": "DS-2015"
+      "level": 0.0,
+      "fill_percent": 0.0,
+      "raw_level": 0.0,
+      "raw_fill_percent": 0.0,
+      "type": "DS-2015",
+      "updated_at": "18/05/2026 17:42"
     },
     "C": {
-        "level": 0.7,
-        "type": "Coating_OF_136"
+      "level": 0.0,
+      "fill_percent": 0.0,
+      "raw_level": 0.0,
+      "raw_fill_percent": 0.0,
+      "type": "Coating_OF_136",
+      "updated_at": "18/05/2026 17:42"
     },
     "D": {
-        "level": 3.0,
-        "type": "Coating_KS_2-002"
+      "level": 0.0,
+      "fill_percent": 0.0,
+      "raw_level": 0.0,
+      "raw_fill_percent": 0.0,
+      "type": "Coating_KS_2-002",
+      "updated_at": "18/05/2026 17:42"
     }
+  }
 }

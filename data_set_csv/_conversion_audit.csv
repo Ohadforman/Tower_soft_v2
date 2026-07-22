@@ -1,0 +1,51 @@
+draw_name,project,geometry,template_used,secondary_coating_filled,notes_default_filled,output_csv
+P0250F_1,LARA - ELOP,Octagonal,LARA - ELOP,True,False,P0250F_1.csv
+P0256F_1,LARA - ELOP,Octagonal,LARA - ELOP,True,False,P0256F_1.csv
+P0312F_1,R&D,ROUND,,False,False,P0312F_1.csv
+P0301F_1,LARA - ELOP,Octagonal,LARA - ELOP,True,False,P0301F_1.csv
+P0313F_1,ELOP - 130/10,STEP INDEX,ELOP - 130/10,True,False,P0313F_1.csv
+P0341F_1,LARA - ELOP,ROUND,LARA - ELOP,True,False,P0341F_1.csv
+P0343F_1,LARA - ELOP,Octagonal,LARA - ELOP,True,False,P0343F_1.csv
+P0264.2F_1,R&D,PANDA - PM,,False,False,P0264.2F_1.csv
+P0366F_1,R&D,ROUND,,False,False,P0366F_1.csv
+P0353F_1,ELOP - 130/10,Octagonal,ELOP - 130/10,True,False,P0353F_1.csv
+RodF_1,R&D,ROUND,,False,False,RodF_1.csv
+P0265.1F_1,R&D,PANDA - PM,,False,False,P0265.1F_1.csv
+RodF_1,CIVAN - LARA,ROUND,CIVAN - LARA,True,False,RodF_1_2.csv
+P0379F_1,CIVAN - LARA,ROUND,CIVAN - LARA,True,False,P0379F_1.csv
+RodF_1,CIVAN - LARA,ROUND,CIVAN - LARA,True,False,RodF_1_3.csv
+RodF_1,CIVAN - LARA,ROUND,CIVAN - LARA,True,False,RodF_1_4.csv
+P0267.12F_1,CIVAN - LARA,PANDA - PM,CIVAN - LARA,True,False,P0267.12F_1.csv
+P0271.2F_1,CIVAN - LARA,PANDA - PM,CIVAN - LARA,True,False,P0271.2F_1.csv
+P0272.3F_1,CIVAN - LARA,PANDA - PM,CIVAN - LARA,True,False,P0272.3F_1.csv
+RodF_1,LARA - ELOP,Octagonal,LARA - ELOP,True,False,RodF_1_5.csv
+P0414F_1,LARA - ELOP,Octagonal,LARA - ELOP,True,False,P0414F_1.csv
+RodF_1,LARA - ELOP,ROUND,LARA - ELOP,True,False,RodF_1_6.csv
+P0412.2F_1,LARA - ELOP,Octagonal,LARA - ELOP,True,False,P0412.2F_1.csv
+3Hr HFF_1,R&D,ROUND,,False,False,3Hr HFF_1.csv
+P0409_CleanF_1,LARA - ELOP,ROUND,LARA - ELOP,True,False,P0409_CleanF_1.csv
+P0412.1F_1,LARA - ELOP,Octagonal,LARA - ELOP,True,False,P0412.1F_1.csv
+RodF_1,R&D,ROUND,,False,False,RodF_1_7.csv
+6Hr HFF_1,R&D,ROUND,,False,False,6Hr HFF_1.csv
+RodF_1,CIVAN - LARA,ROUND,CIVAN - LARA,True,False,RodF_1_8.csv
+RodF_1,CIVAN - LARA,ROUND,CIVAN - LARA,True,False,RodF_1_9.csv
+P0406.1F_1,CIVAN - LARA,PANDA - PM,CIVAN - LARA,True,False,P0406.1F_1.csv
+RodF_1,CIVAN - LARA,ROUND,CIVAN - LARA,True,False,RodF_1_10.csv
+P0406.2F_1,CIVAN - LARA,PANDA - PM,CIVAN - LARA,True,False,P0406.2F_1.csv
+P0415F_1,R&D,ROUND,,False,False,P0415F_1.csv
+P0346.2F_1,CIVAN - LARA,PANDA - PM,CIVAN - LARA,True,False,P0346.2F_1.csv
+P0409F_1,CIVAN - LARA,PANDA - PM,CIVAN - LARA,True,False,P0409F_1.csv
+P0422F_1,R&D,ROUND,,False,False,P0422F_1.csv
+P0426F_1,R&D,ROUND,,False,False,P0426F_1.csv
+RodF_1,R&D,ROUND,,False,False,RodF_1_11.csv
+G009F_1,Gai - Doc,ROUND,,False,False,G009F_1.csv
+P0434.2F_1,CIVAN - LARA,PANDA - PM,CIVAN - LARA,True,False,P0434.2F_1.csv
+P0434.1F_1,CIVAN - LARA,PANDA - PM,CIVAN - LARA,True,False,P0434.1F_1.csv
+P0438.2.1F_1,CIVAN - LARA,PANDA - PM,CIVAN - LARA,True,False,P0438.2.1F_1.csv
+P0442.1F_1,CIVAN - LARA,PANDA - PM,CIVAN - LARA,True,False,P0442.1F_1.csv
+G014F_1,Gai - Doc,ROUND,,False,False,G014F_1.csv
+P0448F_1,R&D,ROUND,,False,False,P0448F_1.csv
+P0454JF_1,R&D,ROUND,,False,False,P0454JF_1.csv
+P0452.1F_1,CIVAN - LARA,ROUND,CIVAN - LARA,True,False,P0452.1F_1.csv
+P0450.1F_1,CIVAN - LARA,PANDA - PM,CIVAN - LARA,True,False,P0450.1F_1.csv
+P0475F_1,R&D,ROUND,,False,False,P0475F_1.csv
