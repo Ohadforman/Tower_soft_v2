@@ -34,10 +34,73 @@ except ImportError:
 
 BASE_DIR = Path(__file__).resolve().parent
 ROOT_DIR_ENV = str(os.environ.get("TOWER_REBUILD_ROOT_DIR", "") or "").strip()
+LOCAL_ROOT_DIR_ENV = str(os.environ.get("TOWER_REBUILD_LOCAL_ROOT_DIR", "") or "").strip()
+GLOBAL_ROOT_DIR_ENV = str(os.environ.get("TOWER_REBUILD_GLOBAL_ROOT_DIR", "") or "").strip()
+LOCAL_FIRST_ENV = str(os.environ.get("TOWER_REBUILD_LOCAL_FIRST", "") or "").strip().lower()
 DATA_DIR_ENV = str(os.environ.get("TOWER_REBUILD_DATA_DIR", "") or "").strip()
-ROOT_DIR = Path(ROOT_DIR_ENV).expanduser().resolve() if ROOT_DIR_ENV else BASE_DIR.parent
 STATIC_DIR = BASE_DIR / "static"
 VENDOR_DIR = BASE_DIR / ".vendor"
+
+
+def _resolve_runtime_candidate(path: Path) -> Path:
+    candidate = Path(path).expanduser()
+    try:
+        return candidate.resolve()
+    except FileNotFoundError:
+        return Path(os.path.abspath(str(candidate)))
+
+
+def _looks_like_runtime_root(path: Path) -> bool:
+    markers = ("data", "maintenance", "state", "config")
+    hits = 0
+    for name in markers:
+        if (path / name).exists():
+            hits += 1
+    return hits >= 2
+
+
+def default_local_runtime_root() -> Path:
+    return _resolve_runtime_candidate(Path.home() / "Documents" / "documents-cache_tower")
+
+
+def prefer_local_runtime_root() -> bool:
+    if LOCAL_FIRST_ENV in {"0", "false", "no", "off"}:
+        return False
+    if LOCAL_FIRST_ENV in {"1", "true", "yes", "on"}:
+        return True
+    if GLOBAL_ROOT_DIR_ENV or LOCAL_ROOT_DIR_ENV:
+        return True
+    repo_candidate = _resolve_runtime_candidate(BASE_DIR.parent)
+    return _looks_like_runtime_root(repo_candidate)
+
+
+def resolve_runtime_root() -> Path:
+    if ROOT_DIR_ENV:
+        return _resolve_runtime_candidate(Path(ROOT_DIR_ENV))
+    if LOCAL_ROOT_DIR_ENV:
+        return _resolve_runtime_candidate(Path(LOCAL_ROOT_DIR_ENV))
+    if prefer_local_runtime_root():
+        return default_local_runtime_root()
+    repo_candidate = _resolve_runtime_candidate(BASE_DIR.parent)
+    if _looks_like_runtime_root(repo_candidate):
+        return repo_candidate
+    return default_local_runtime_root()
+
+
+def resolve_deployment_root() -> Path:
+    if GLOBAL_ROOT_DIR_ENV:
+        return _resolve_runtime_candidate(Path(GLOBAL_ROOT_DIR_ENV))
+    if ROOT_DIR_ENV:
+        return _resolve_runtime_candidate(Path(ROOT_DIR_ENV))
+    repo_candidate = _resolve_runtime_candidate(BASE_DIR.parent)
+    if _looks_like_runtime_root(repo_candidate):
+        return repo_candidate
+    return ROOT_DIR
+
+
+ROOT_DIR = resolve_runtime_root()
+DEPLOYMENT_ROOT = resolve_deployment_root()
+ROOT_DIR.mkdir(parents=True, exist_ok=True)
 DATA_DIR = Path(DATA_DIR_ENV).expanduser().resolve() if DATA_DIR_ENV else ROOT_DIR / "data"
 
 DRAW_ORDERS = DATA_DIR / "draw_orders.csv"
@@ -53,6 +116,8 @@ SELECTED_CSV_JSON = DATA_DIR / "selected_csv.json"
 DEVELOPMENT_PROJECTS = DATA_DIR / "development_projects.csv"
 DEVELOPMENT_EXPERIMENTS = DATA_DIR / "development_experiments.csv"
 EXPERIMENT_UPDATES = DATA_DIR / "experiment_updates.csv"
+if str(DEPLOYMENT_ROOT) not in sys.path:
+    sys.path.insert(0, str(DEPLOYMENT_ROOT))
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 if VENDOR_DIR.exists() and str(VENDOR_DIR) not in sys.path:
@@ -109,11 +174,16 @@ def _copy_missing_children(source: Path, destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     for child in sorted(source.iterdir(), key=lambda item: item.name.lower()):
         target = destination / child.name
-        if target.exists():
-            continue
         if child.is_dir():
-            shutil.copytree(child, target)
+            if target.exists() and target.is_file():
+                continue
+            if target.exists():
+                _copy_missing_children(child, target)
+            else:
+                shutil.copytree(child, target)
         else:
+            if target.exists():
+                continue
             shutil.copy2(child, target)
 
 
@@ -152,6 +222,7 @@ BACKUPS_DIR = ROOT_DIR / "backups"
 DONE_SNAPSHOTS_DIR = ROOT_DIR / "hooks" / "done_csv_snapshots"
 DUCKDB_PATH = DATA_DIR / "tower.duckdb"
 STATE_DIR = ROOT_DIR / "state"
+SHARED_STATE_DIR = DEPLOYMENT_ROOT / "state"
 DASHBOARD_EXPORTS_DIR = STATE_DIR / "dashboard_exports"
 COATING_STOCK = STATE_DIR / "coating_type_stock.json"
 COATING_INVENTORY_META = STATE_DIR / "coating_inventory_meta.json"
@@ -422,6 +493,7 @@ def atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, path)
+        queue_global_mirror_sync(path)
     finally:
         try:
             if temp_path.exists():
@@ -440,6 +512,7 @@ def atomic_write_bytes(path: Path, content: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, path)
+        queue_global_mirror_sync(path)
     finally:
         try:
             if temp_path.exists():
@@ -460,6 +533,7 @@ def write_dataframe_atomic(path: Path, df: pd.DataFrame) -> None:
         else:
             df.to_csv(temp_path, index=False)
         os.replace(temp_path, path)
+        queue_global_mirror_sync(path)
     finally:
         try:
             if temp_path.exists():
@@ -604,6 +678,7 @@ def write_csv_rows(path: Path, rows: list[dict[str, object]], fieldnames: list[s
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, path)
+        queue_global_mirror_sync(path)
     finally:
         try:
             if temp_path.exists():
@@ -720,6 +795,7 @@ def manual_page_render_mode() -> str:
 
 
 def ensure_runtime_directories() -> None:
+    SHARED_STATE_DIR.mkdir(parents=True, exist_ok=True)
     for path in (
         DATA_DIR,
         MAINTENANCE_DIR,
@@ -864,7 +940,14 @@ TRACKED_PATH_SPECS = (
     {"key": "maintenance_manual_pages_dir", "label": "Maintenance Manual Pages Workspace", "global_name": "MAINTENANCE_MANUAL_PAGES_DIR", "kind": "dir", "default": MAINTENANCE_MANUAL_PAGES_DIR},
     {"key": "development_media_dir", "label": "Development Media Workspace", "global_name": "DEVELOPMENT_MEDIA_DIR", "kind": "dir", "default": DEVELOPMENT_MEDIA_DIR},
     {"key": "manuals_dir", "label": "Manuals Workspace", "global_name": "MANUALS_DIR", "kind": "dir", "default": MANUALS_DIR},
-    {"key": "external_manuals_dir", "label": "External Manuals Workspace", "global_name": "EXTERNAL_MANUALS_DIR", "kind": "dir", "default": EXTERNAL_MANUALS_DIR},
+    {
+        "key": "external_manuals_dir",
+        "label": "External Manuals Workspace",
+        "global_name": "EXTERNAL_MANUALS_DIR",
+        "kind": "dir",
+        "default": EXTERNAL_MANUALS_DIR,
+        "optional": True,
+    },
     {"key": "dashboard_exports_dir", "label": "Dashboard Exports Workspace", "global_name": "DASHBOARD_EXPORTS_DIR", "kind": "dir", "default": DASHBOARD_EXPORTS_DIR},
     {"key": "manual_page_cache_dir", "label": "Manual Page Cache Workspace", "global_name": "MANUAL_PAGE_CACHE_DIR", "kind": "dir", "default": MANUAL_PAGE_CACHE_DIR},
     {"key": "maintenance_package_photos_dir", "label": "Maintenance Package Photos", "global_name": "MAINTENANCE_PACKAGE_PHOTOS_DIR", "kind": "dir", "default": MAINTENANCE_PACKAGE_PHOTOS_DIR},
@@ -881,6 +964,81 @@ def normalize_tracked_path_value(value: str | Path) -> Path:
     if not candidate.is_absolute():
         candidate = ROOT_DIR / candidate
     return candidate.resolve()
+
+
+_WINDOWS_DRIVE_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
+_WINDOWS_UNC_PATH_RE = re.compile(r"^\\\\[^\\]+\\[^\\]+")
+
+
+def _looks_like_windows_path_text(value: str) -> bool:
+    text = str(value or "").strip()
+    return bool(text) and (
+        _WINDOWS_DRIVE_PATH_RE.match(text) is not None
+        or _WINDOWS_UNC_PATH_RE.match(text) is not None
+    )
+
+
+def _restore_legacy_global_mirror_text(value: str | Path) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    root_prefix = str(ROOT_DIR).rstrip("/\\")
+    if not root_prefix:
+        return text
+    normalized_text = text.replace("\\", "/")
+    normalized_root = root_prefix.replace("\\", "/")
+    prefix = f"{normalized_root}/"
+    if normalized_text.startswith(prefix):
+        suffix = normalized_text[len(prefix):]
+        if _looks_like_windows_path_text(suffix):
+            return suffix
+    return text
+
+
+def normalize_global_mirror_config_text(value: str | Path | None) -> str:
+    text = _restore_legacy_global_mirror_text(value or "")
+    if not text:
+        return ""
+    if _looks_like_windows_path_text(text):
+        return text
+    return str(normalize_tracked_path_value(text))
+
+
+def resolve_global_mirror_config_path(value: str | Path | None) -> Path | None:
+    text = normalize_global_mirror_config_text(value)
+    if not text:
+        return None
+    if _looks_like_windows_path_text(text):
+        if os.name != "nt":
+            return None
+        return normalize_tracked_path_value(text)
+    return normalize_tracked_path_value(text)
+
+
+def join_global_mirror_root_text(root_text: str, relative: Path) -> str:
+    base = str(root_text or "").strip()
+    if not base:
+        return ""
+    relative_parts = [part for part in relative.parts if part not in {"", "."}]
+    if not relative_parts:
+        return base
+    separator = "\\" if "\\" in base and "/" not in base else "/"
+    if _looks_like_windows_path_text(base):
+        return f"{base.rstrip('/\\\\')}{separator}{separator.join(relative_parts)}"
+    return str(Path(base) / relative)
+
+
+def derived_global_mirror_text_for_local_path(root_text: str, local_path: Path) -> str:
+    base = str(root_text or "").strip()
+    if not base:
+        return ""
+    local_candidate = _normalized_lock_target(local_path)
+    runtime_root = _normalized_lock_target(ROOT_DIR)
+    try:
+        relative = local_candidate.resolve().relative_to(runtime_root.resolve())
+    except ValueError:
+        return ""
+    return join_global_mirror_root_text(base, relative)
 
 
 def tracked_path_defaults() -> dict[str, Path]:
@@ -939,6 +1097,479 @@ def current_tracked_path_overrides_mtime_ns() -> int | None:
         return TRACKED_PATH_OVERRIDES_FILE.stat().st_mtime_ns
     except FileNotFoundError:
         return None
+
+
+GLOBAL_MIRROR_ROOT_FILE = SHARED_STATE_DIR / "global_mirror_root.json"
+GLOBAL_MIRROR_OVERRIDES_FILE = SHARED_STATE_DIR / "global_mirror_path_overrides.json"
+GLOBAL_MIRROR_RETRY_SECONDS = 15.0
+_GLOBAL_MIRROR_ROOT_MTIME_NS: int | None = None
+_GLOBAL_MIRROR_OVERRIDES_MTIME_NS: int | None = None
+_GLOBAL_MIRROR_ROOT_RAW = ""
+_GLOBAL_MIRROR_ROOT_PATH: Path | None = None
+_GLOBAL_MIRROR_PATH_RAWS: dict[str, str] = {}
+_GLOBAL_MIRROR_PATHS: dict[str, Path] = {}
+_GLOBAL_MIRROR_QUEUE: dict[str, dict[str, object]] = {}
+_GLOBAL_MIRROR_LAST_SUCCESS: dict[str, str] = {}
+_GLOBAL_MIRROR_LAST_ERROR: dict[str, str] = {}
+_GLOBAL_MIRROR_LAST_ATTEMPT: dict[str, str] = {}
+_GLOBAL_MIRROR_LOCK = threading.Lock()
+_GLOBAL_MIRROR_WAKE_EVENT = threading.Event()
+_GLOBAL_MIRROR_STOP_EVENT = threading.Event()
+_GLOBAL_MIRROR_THREAD: threading.Thread | None = None
+
+
+def load_global_mirror_root_override() -> str:
+    raw = read_json_dict(GLOBAL_MIRROR_ROOT_FILE)
+    return normalize_global_mirror_config_text(raw.get("path", ""))
+
+
+def apply_global_mirror_root_override(path: str | Path | None = None) -> None:
+    global _GLOBAL_MIRROR_ROOT_RAW, _GLOBAL_MIRROR_ROOT_PATH
+    source = GLOBAL_ROOT_DIR_ENV if GLOBAL_ROOT_DIR_ENV else path
+    _GLOBAL_MIRROR_ROOT_RAW = normalize_global_mirror_config_text(source)
+    _GLOBAL_MIRROR_ROOT_PATH = resolve_global_mirror_config_path(_GLOBAL_MIRROR_ROOT_RAW)
+
+
+def save_global_mirror_root_override(path: str | Path | None) -> None:
+    value = normalize_global_mirror_config_text(path)
+    if value:
+        write_json_value(GLOBAL_MIRROR_ROOT_FILE, {"path": value})
+        return
+    try:
+        GLOBAL_MIRROR_ROOT_FILE.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def current_global_mirror_root_mtime_ns() -> int | None:
+    try:
+        return GLOBAL_MIRROR_ROOT_FILE.stat().st_mtime_ns
+    except FileNotFoundError:
+        return None
+
+
+def sync_global_mirror_root_if_needed(force: bool = False) -> None:
+    global _GLOBAL_MIRROR_ROOT_MTIME_NS
+    current_mtime = current_global_mirror_root_mtime_ns()
+    if not force and current_mtime == _GLOBAL_MIRROR_ROOT_MTIME_NS:
+        return
+    apply_global_mirror_root_override(load_global_mirror_root_override() if current_mtime is not None else None)
+    _GLOBAL_MIRROR_ROOT_MTIME_NS = current_mtime
+
+
+def current_global_mirror_root() -> str:
+    sync_global_mirror_root_if_needed()
+    return str(_GLOBAL_MIRROR_ROOT_RAW or "").strip()
+
+
+def load_global_mirror_overrides() -> dict[str, str]:
+    raw = read_json_dict(GLOBAL_MIRROR_OVERRIDES_FILE)
+    overrides: dict[str, str] = {}
+    for item in TRACKED_PATH_SPECS:
+        key = str(item["key"])
+        value = raw.get(key)
+        if not value:
+            continue
+        overrides[key] = normalize_global_mirror_config_text(value)
+    return overrides
+
+
+def apply_global_mirror_overrides(overrides: dict[str, str] | None = None) -> None:
+    global _GLOBAL_MIRROR_PATH_RAWS, _GLOBAL_MIRROR_PATHS
+    _GLOBAL_MIRROR_PATH_RAWS = {}
+    _GLOBAL_MIRROR_PATHS = {}
+    for key, path in (overrides or {}).items():
+        if key not in TRACKED_PATH_SPEC_MAP:
+            continue
+        raw_value = normalize_global_mirror_config_text(path)
+        if not raw_value:
+            continue
+        _GLOBAL_MIRROR_PATH_RAWS[key] = raw_value
+        resolved = resolve_global_mirror_config_path(raw_value)
+        if resolved is not None:
+            _GLOBAL_MIRROR_PATHS[key] = resolved
+
+
+def save_global_mirror_overrides(overrides: dict[str, str]) -> None:
+    payload = {
+        key: normalize_global_mirror_config_text(path)
+        for key, path in overrides.items()
+        if key in TRACKED_PATH_SPEC_MAP and normalize_global_mirror_config_text(path)
+    }
+    if payload:
+        write_json_value(GLOBAL_MIRROR_OVERRIDES_FILE, payload)
+        return
+    try:
+        GLOBAL_MIRROR_OVERRIDES_FILE.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def current_global_mirror_overrides_mtime_ns() -> int | None:
+    try:
+        return GLOBAL_MIRROR_OVERRIDES_FILE.stat().st_mtime_ns
+    except FileNotFoundError:
+        return None
+
+
+def sync_global_mirror_overrides_if_needed(force: bool = False) -> None:
+    global _GLOBAL_MIRROR_OVERRIDES_MTIME_NS
+    current_mtime = current_global_mirror_overrides_mtime_ns()
+    if not force and current_mtime == _GLOBAL_MIRROR_OVERRIDES_MTIME_NS:
+        return
+    apply_global_mirror_overrides(load_global_mirror_overrides() if current_mtime is not None else {})
+    _GLOBAL_MIRROR_OVERRIDES_MTIME_NS = current_mtime
+
+
+def effective_global_mirror_path_for_key(key: str, local_path: Path) -> Path | None:
+    sync_global_mirror_root_if_needed()
+    sync_global_mirror_overrides_if_needed()
+    explicit = _GLOBAL_MIRROR_PATHS.get(key)
+    if explicit is not None:
+        return normalize_tracked_path_value(explicit)
+    if _GLOBAL_MIRROR_ROOT_PATH is None:
+        return None
+    local_candidate = _normalized_lock_target(local_path)
+    runtime_root = _normalized_lock_target(ROOT_DIR)
+    try:
+        relative = local_candidate.resolve().relative_to(runtime_root.resolve())
+    except ValueError:
+        return None
+    target = normalize_tracked_path_value(_GLOBAL_MIRROR_ROOT_PATH) / relative
+    if _normalized_lock_target(target) == local_candidate:
+        return None
+    return target
+
+
+def effective_global_mirror_display_for_key(key: str, local_path: Path) -> str:
+    sync_global_mirror_root_if_needed()
+    sync_global_mirror_overrides_if_needed()
+    explicit = str(_GLOBAL_MIRROR_PATH_RAWS.get(key, "") or "").strip()
+    if explicit:
+        return explicit
+    root_text = str(_GLOBAL_MIRROR_ROOT_RAW or "").strip()
+    if not root_text:
+        return ""
+    return derived_global_mirror_text_for_local_path(root_text, local_path)
+
+
+def current_global_mirror_paths() -> dict[str, Path]:
+    result: dict[str, Path] = {}
+    for item, local_path in current_tracked_paths():
+        key = str(item["key"])
+        target = effective_global_mirror_path_for_key(key, local_path)
+        if target is not None:
+            result[key] = target
+    return result
+
+
+def _global_mirror_task_id(key: str, target: Path) -> str:
+    return f"{key}:{_normalized_lock_target(target)}"
+
+
+def mirror_file_atomic(source: Path, target: Path) -> None:
+    source_path = _normalized_lock_target(source)
+    target_path = _normalized_lock_target(target)
+    if source_path == target_path:
+        return
+    if not source_path.exists() or not source_path.is_file():
+        raise FileNotFoundError(f"Local source is missing: {source_path}")
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{target_path.name}.", suffix=".mirror.tmp", dir=str(target_path.parent))
+    os.close(fd)
+    temp_path = Path(temp_name)
+    try:
+        shutil.copy2(source_path, temp_path)
+        os.replace(temp_path, target_path)
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def resolve_global_mirror_target(local_path: Path) -> tuple[str, Path] | None:
+    candidate = _normalized_lock_target(local_path)
+    for spec, tracked_path in current_tracked_paths():
+        key = str(spec["key"])
+        mirror_base = effective_global_mirror_path_for_key(key, tracked_path)
+        if mirror_base is None:
+            continue
+        local_base = _normalized_lock_target(tracked_path)
+        if str(spec["kind"]) == "file":
+            if candidate != local_base:
+                continue
+            return key, normalize_tracked_path_value(mirror_base)
+        try:
+            relative = candidate.resolve().relative_to(local_base.resolve())
+        except ValueError:
+            continue
+        mirror_target = normalize_tracked_path_value(mirror_base) / relative
+        if _normalized_lock_target(mirror_target) == candidate:
+            return None
+        return key, mirror_target
+    return None
+
+
+def _set_global_mirror_result(key: str, *, success: bool, detail: str) -> None:
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with _GLOBAL_MIRROR_LOCK:
+        _GLOBAL_MIRROR_LAST_ATTEMPT[key] = stamp
+        if success:
+            _GLOBAL_MIRROR_LAST_SUCCESS[key] = stamp
+            _GLOBAL_MIRROR_LAST_ERROR.pop(key, None)
+            return
+        _GLOBAL_MIRROR_LAST_ERROR[key] = str(detail or "").strip()
+
+
+def queue_global_mirror_sync(path: Path | str) -> None:
+    candidate = _normalized_lock_target(path)
+    if not candidate.exists() or not candidate.is_file():
+        return
+    resolved = resolve_global_mirror_target(candidate)
+    if resolved is None:
+        return
+    key, target = resolved
+    task_id = _global_mirror_task_id(key, target)
+    with _GLOBAL_MIRROR_LOCK:
+        existing = _GLOBAL_MIRROR_QUEUE.get(task_id) or {}
+        _GLOBAL_MIRROR_QUEUE[task_id] = {
+            "task_id": task_id,
+            "key": key,
+            "source": str(candidate),
+            "target": str(target),
+            "attempts": int(existing.get("attempts", 0)),
+            "queued_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    _GLOBAL_MIRROR_WAKE_EVENT.set()
+
+
+def queue_all_global_mirror_syncs() -> None:
+    effective_paths = current_global_mirror_paths()
+    if not effective_paths:
+        return
+    for spec, local_base in current_tracked_paths():
+        key = str(spec["key"])
+        mirror_base = effective_paths.get(key)
+        if mirror_base is None:
+            continue
+        local_candidate = _normalized_lock_target(local_base)
+        if str(spec["kind"]) == "file":
+            if local_candidate.exists() and local_candidate.is_file():
+                queue_global_mirror_sync(local_candidate)
+            continue
+        if not local_candidate.exists() or not local_candidate.is_dir():
+            continue
+        for child in sorted(local_candidate.rglob("*")):
+            if child.is_file():
+                queue_global_mirror_sync(child)
+
+
+def seed_local_from_global_if_needed() -> None:
+    effective_paths = current_global_mirror_paths()
+    if not effective_paths:
+        return
+    tracked = {str(item["key"]): (item, Path(current_path)) for item, current_path in current_tracked_paths()}
+    for key, mirror_path in effective_paths.items():
+        pair = tracked.get(key)
+        if pair is None:
+            continue
+        spec, local_path = pair
+        local_candidate = _normalized_lock_target(local_path)
+        global_candidate = _normalized_lock_target(mirror_path)
+        if local_candidate == global_candidate or not global_candidate.exists():
+            continue
+        try:
+            if str(spec["kind"]) == "file":
+                if local_candidate.exists() or not global_candidate.is_file():
+                    continue
+                local_candidate.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(global_candidate, local_candidate)
+                continue
+            if not global_candidate.is_dir():
+                continue
+            if local_candidate.exists() and local_candidate.is_file():
+                continue
+            _copy_missing_children(global_candidate, local_candidate)
+        except OSError:
+            continue
+
+
+def deployment_source_for_local_path(local_path: Path) -> Path | None:
+    if _normalized_lock_target(ROOT_DIR) == _normalized_lock_target(DEPLOYMENT_ROOT):
+        return None
+    local_candidate = _normalized_lock_target(local_path)
+    local_root = _normalized_lock_target(ROOT_DIR)
+    deployment_root = _normalized_lock_target(DEPLOYMENT_ROOT)
+    try:
+        relative = local_candidate.resolve().relative_to(local_root.resolve())
+    except ValueError:
+        return None
+    source = deployment_root / relative
+    if _normalized_lock_target(source) == local_candidate:
+        return None
+    return source
+
+
+def seed_local_from_deployment_if_needed() -> None:
+    for spec, local_path in current_tracked_paths():
+        local_candidate = _normalized_lock_target(local_path)
+        source_candidate = deployment_source_for_local_path(local_candidate)
+        if source_candidate is None or not source_candidate.exists():
+            continue
+        try:
+            if str(spec["kind"]) == "file":
+                if local_candidate.exists() or not source_candidate.is_file():
+                    continue
+                local_candidate.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_candidate, local_candidate)
+                continue
+            if not source_candidate.is_dir():
+                continue
+            if local_candidate.exists() and local_candidate.is_file():
+                continue
+            _copy_missing_children(source_candidate, local_candidate)
+        except OSError:
+            continue
+
+
+def run_global_mirror_task(task: dict[str, object]) -> None:
+    key = str(task.get("key", "")).strip()
+    source = _normalized_lock_target(Path(str(task.get("source", "")).strip()))
+    target = normalize_tracked_path_value(str(task.get("target", "")).strip())
+    task_id = str(task.get("task_id", "")).strip() or _global_mirror_task_id(key, target)
+    if not key:
+        return
+    try:
+        mirror_file_atomic(source, target)
+    except OSError as exc:
+        with _GLOBAL_MIRROR_LOCK:
+            current = dict(_GLOBAL_MIRROR_QUEUE.get(task_id) or task)
+            current["attempts"] = int(current.get("attempts", 0)) + 1
+            current["last_error"] = str(exc)
+            current["last_attempt_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            _GLOBAL_MIRROR_QUEUE[task_id] = current
+        _set_global_mirror_result(key, success=False, detail=str(exc))
+        return
+    with _GLOBAL_MIRROR_LOCK:
+        _GLOBAL_MIRROR_QUEUE.pop(task_id, None)
+    _set_global_mirror_result(key, success=True, detail="")
+
+
+def global_mirror_worker_loop() -> None:
+    while not _GLOBAL_MIRROR_STOP_EVENT.is_set():
+        _GLOBAL_MIRROR_WAKE_EVENT.wait(timeout=GLOBAL_MIRROR_RETRY_SECONDS)
+        _GLOBAL_MIRROR_WAKE_EVENT.clear()
+        if _GLOBAL_MIRROR_STOP_EVENT.is_set():
+            break
+        with _GLOBAL_MIRROR_LOCK:
+            tasks = [dict(item) for item in _GLOBAL_MIRROR_QUEUE.values()]
+        for task in tasks:
+            if _GLOBAL_MIRROR_STOP_EVENT.is_set():
+                return
+            run_global_mirror_task(task)
+
+
+def ensure_global_mirror_worker() -> None:
+    global _GLOBAL_MIRROR_THREAD
+    with _GLOBAL_MIRROR_LOCK:
+        thread = _GLOBAL_MIRROR_THREAD
+        if thread is not None and thread.is_alive():
+            return
+        _GLOBAL_MIRROR_STOP_EVENT.clear()
+        _GLOBAL_MIRROR_THREAD = threading.Thread(
+            target=global_mirror_worker_loop,
+            name="tower-global-mirror",
+            daemon=True,
+        )
+        _GLOBAL_MIRROR_THREAD.start()
+
+
+def stop_global_mirror_worker() -> None:
+    _GLOBAL_MIRROR_STOP_EVENT.set()
+    _GLOBAL_MIRROR_WAKE_EVENT.set()
+
+
+def global_mirror_state_for_key(key: str, kind: str, local_path: Path) -> dict[str, object]:
+    sync_global_mirror_root_if_needed()
+    sync_global_mirror_overrides_if_needed()
+    has_explicit = bool(str(_GLOBAL_MIRROR_PATH_RAWS.get(key, "") or "").strip())
+    has_root = bool(str(_GLOBAL_MIRROR_ROOT_RAW or "").strip())
+    display_path = effective_global_mirror_display_for_key(key, local_path)
+    mirror_path = effective_global_mirror_path_for_key(key, local_path)
+    if mirror_path is None and not display_path:
+        detail = "No global mirror configured."
+        if has_root and not path_is_within(_normalized_lock_target(local_path), _normalized_lock_target(ROOT_DIR)):
+            detail = "This path sits outside the local runtime root. Set an explicit per-path global mirror if you need it synced too."
+        return {
+            "enabled": False,
+            "path": "",
+            "status": "LOCAL ONLY",
+            "detail": detail,
+            "last_success": "",
+            "last_attempt": "",
+            "pending_count": 0,
+            "last_error": "",
+        }
+    if mirror_path is None:
+        detail = "Saved for deployment. This machine cannot reach that global path directly, so saves stay local here."
+        if has_explicit:
+            detail = f"{detail} Using explicit per-path mirror."
+        elif has_root:
+            detail = f"{detail} Derived from the global mirror root."
+        return {
+            "enabled": True,
+            "path": display_path,
+            "status": "CONFIG ONLY",
+            "detail": detail,
+            "last_success": "",
+            "last_attempt": "",
+            "pending_count": 0,
+            "last_error": "",
+        }
+    target = normalize_tracked_path_value(mirror_path)
+    exists = target.exists()
+    wrong_kind = (kind == "dir" and exists and not target.is_dir()) or (kind == "file" and exists and not target.is_file())
+    writable_probe = target if exists else target.parent
+    writable = writable_probe.exists() and os.access(writable_probe, os.W_OK)
+    with _GLOBAL_MIRROR_LOCK:
+        pending_count = sum(1 for task in _GLOBAL_MIRROR_QUEUE.values() if str(task.get("key", "")).strip() == key)
+        last_success = str(_GLOBAL_MIRROR_LAST_SUCCESS.get(key, "")).strip()
+        last_attempt = str(_GLOBAL_MIRROR_LAST_ATTEMPT.get(key, "")).strip()
+        last_error = str(_GLOBAL_MIRROR_LAST_ERROR.get(key, "")).strip()
+    if wrong_kind:
+        status = "BLOCKED"
+        detail = "Configured global path exists with the wrong file or folder type."
+    elif pending_count:
+        status = "SYNCING"
+        detail = f"{pending_count} save sync job{'s' if pending_count != 1 else ''} queued for the global mirror."
+    elif last_error:
+        status = "RETRYING"
+        detail = last_error
+    elif last_success:
+        status = "SYNCED"
+        detail = f"Last successful sync: {last_success}"
+    elif writable or exists:
+        status = "READY"
+        detail = "Global mirror is configured and ready for the next save."
+    else:
+        status = "WAITING"
+        detail = "Global mirror path is saved, but the target is not reachable right now."
+    if has_explicit:
+        detail = f"{detail} Using explicit per-path mirror."
+    elif has_root:
+        detail = f"{detail} Derived from the global mirror root."
+    return {
+        "enabled": True,
+        "path": display_path or str(target),
+        "status": status,
+        "detail": detail,
+        "last_success": last_success,
+        "last_attempt": last_attempt,
+        "pending_count": pending_count,
+        "last_error": last_error,
+    }
 
 
 _CONTAINER_LOGGER_LOCK = threading.Lock()
@@ -1169,6 +1800,12 @@ def sync_tracked_path_overrides_if_needed(force: bool = False) -> None:
 
 
 sync_tracked_path_overrides_if_needed(force=True)
+sync_global_mirror_root_if_needed(force=True)
+sync_global_mirror_overrides_if_needed(force=True)
+seed_local_from_deployment_if_needed()
+seed_local_from_global_if_needed()
+queue_all_global_mirror_syncs()
+ensure_global_mirror_worker()
 
 FULL_BACKUP_INTERVAL = timedelta(days=7)
 FULL_BACKUP_POLICY_LABEL = "Runs inside the app once every 7 days while the app is active"
@@ -1243,7 +1880,13 @@ def relocate_file_path(label: str, source: Path, destination: Path) -> list[str]
 def merge_directory_contents(label: str, source: Path, destination: Path) -> list[str]:
     notes: list[str] = []
     destination.mkdir(parents=True, exist_ok=True)
-    for child in sorted(source.iterdir(), key=lambda item: item.name.lower()):
+    try:
+        children = sorted(source.iterdir(), key=lambda item: item.name.lower())
+    except OSError:
+        return notes
+    for child in children:
+        if not child.exists():
+            continue
         target_child = destination / child.name
         if child.is_dir():
             if target_child.exists() and target_child.is_file():
@@ -1255,7 +1898,10 @@ def merge_directory_contents(label: str, source: Path, destination: Path) -> lis
         if target_child.exists():
             notes.append(f"{label}: kept existing file {target_child.name} and left the old copy untouched.")
             continue
-        shutil.move(str(child), str(target_child))
+        try:
+            shutil.move(str(child), str(target_child))
+        except FileNotFoundError:
+            continue
     cleanup_empty_parent_chain(source, ROOT_DIR)
     return notes
 
@@ -1657,13 +2303,23 @@ def find_maintenance_source_row_mask(df: pd.DataFrame, task_id: str, component: 
     return mask
 
 
-def update_maintenance_source_task(source_file: str, task_id: str, component: str, task: str, updates: dict[str, object]) -> None:
+def ensure_maintenance_source_path(source_file: str) -> Path:
     source_name = str(source_file or "").strip()
     if not source_name:
         raise ValueError("Task source file is missing.")
-    path = MAINTENANCE_DIR / source_name
-    if not path.exists():
-        raise FileNotFoundError(f"Maintenance source file not found: {path}")
+    local_path = MAINTENANCE_DIR / source_name
+    if local_path.exists():
+        return local_path
+    deployment_path = DEPLOYMENT_ROOT / "maintenance" / source_name
+    if deployment_path.exists() and deployment_path.is_file():
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(deployment_path, local_path)
+        return local_path
+    raise FileNotFoundError(f"Maintenance source file not found: {local_path}")
+
+
+def update_maintenance_source_task(source_file: str, task_id: str, component: str, task: str, updates: dict[str, object]) -> None:
+    path = ensure_maintenance_source_path(source_file)
     suffix = path.suffix.lower()
     if suffix in {".xlsx", ".xls"}:
         df = pd.read_excel(path)
@@ -1686,12 +2342,7 @@ def update_maintenance_source_task(source_file: str, task_id: str, component: st
 
 
 def delete_maintenance_source_task(source_file: str, task_id: str, component: str, task: str) -> None:
-    source_name = str(source_file or "").strip()
-    if not source_name:
-        raise ValueError("Task source file is missing.")
-    path = MAINTENANCE_DIR / source_name
-    if not path.exists():
-        raise FileNotFoundError(f"Maintenance source file not found: {path}")
+    path = ensure_maintenance_source_path(source_file)
     suffix = path.suffix.lower()
     if suffix in {".xlsx", ".xls"}:
         df = pd.read_excel(path)
@@ -1772,12 +2423,7 @@ def create_maintenance_source_task(
     task: str,
     task_group: str,
 ) -> dict[str, str]:
-    source_name = str(source_file or "").strip()
-    if not source_name:
-        raise ValueError("Task source file is required.")
-    path = MAINTENANCE_DIR / source_name
-    if not path.exists():
-        raise FileNotFoundError(f"Maintenance source file not found: {path}")
+    path = ensure_maintenance_source_path(source_file)
     suffix = path.suffix.lower()
     if suffix in {".xlsx", ".xls"}:
         df = pd.read_excel(path)
@@ -1839,7 +2485,7 @@ def create_maintenance_source_task(
         "component": safe_component,
         "task": safe_task,
         "task_group": safe_group,
-        "source_file": source_name,
+        "source_file": path.name,
     }
 
 
@@ -4887,16 +5533,20 @@ def zone_dataset_target_path(csv_name: str, zone_number: int) -> Path:
 def list_dataset_csv_files(include_zone_files: bool = False) -> list[Path]:
     if not DATASET_DIR.exists():
         return []
-    files = [
-        path
-        for path in DATASET_DIR.rglob("*.csv")
-        if path.is_file()
-        and path.name != "_conversion_audit.csv"
-        and looks_like_dataset_snapshot_path(path)
-    ]
+    files: list[Path] = []
+    for path in DATASET_DIR.rglob("*.csv"):
+        try:
+            is_file = path.is_file()
+        except OSError:
+            continue
+        if not is_file:
+            continue
+        if path.name == "_conversion_audit.csv" or not looks_like_dataset_snapshot_path(path):
+            continue
+        files.append(path)
     if not include_zone_files:
         files = [path for path in files if not is_zone_dataset_path(path)]
-    return sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
+    return sorted(files, key=lambda p: p.stat().st_mtime if p.exists() else 0.0, reverse=True)
 
 
 def list_recent_dataset_files(limit: int = 6) -> list[dict]:
@@ -5284,29 +5934,66 @@ def summarize_diagnostics() -> dict:
     ensure_app_weekly_full_backup()
     tracked_paths = current_tracked_paths()
     defaults = tracked_path_defaults()
+    default_local_root = default_local_runtime_root()
+    global_root = current_global_mirror_root()
     container_logger_status = current_container_logger_status()
     path_rows = []
     ready_count = 0
+    global_mirror_count = 0
+    global_mirror_ready_count = 0
+    global_mirror_pending_count = 0
+    global_mirror_issue_count = 0
     for item, path in tracked_paths:
         key = str(item["key"])
         label = str(item["label"])
+        kind = str(item["kind"])
+        optional = bool(item.get("optional"))
         exists = path.exists()
         readable = exists and os.access(path, os.R_OK)
         writable_target = path if exists else path.parent
         writable = writable_target.exists() and os.access(writable_target, os.W_OK)
         healthy = exists and readable and writable
-        ready_count += int(healthy)
+        optional_missing = optional and not exists
+        path_ok = healthy or optional_missing
+        ready_count += int(path_ok)
+        global_state = global_mirror_state_for_key(key, kind, path)
+        if global_state["enabled"]:
+            global_mirror_count += 1
+            global_mirror_pending_count += int(global_state["pending_count"] or 0)
+            if str(global_state["status"]) in {"READY", "SYNCED"}:
+                global_mirror_ready_count += 1
+            elif str(global_state["status"]) in {"BLOCKED", "WAITING", "RETRYING"}:
+                global_mirror_issue_count += 1
+        if optional_missing:
+            local_status = "OPTIONAL"
+            local_detail = "Fallback folder is not present on this machine. The built-in manuals workspace is still active."
+        elif healthy:
+            local_status = "READY"
+            local_detail = "Local path is reachable for read/write work."
+        else:
+            local_status = "BLOCKED"
+            local_detail = "Local path is missing or not writable."
         path_rows.append(
             {
                 "key": key,
                 "label": label,
-                "kind": item["kind"],
-                "status": "READY" if healthy else "BLOCKED",
+                "kind": kind,
+                "status": local_status,
+                "local_detail": local_detail,
+                "optional": optional,
                 "exists": exists,
                 "modified": datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M") if exists else "missing",
                 "path": str(path),
                 "default_path": str(defaults[key]),
                 "is_override": path != defaults[key],
+                "global_enabled": bool(global_state["enabled"]),
+                "global_path": str(global_state["path"] or ""),
+                "global_status": str(global_state["status"]),
+                "global_detail": str(global_state["detail"]),
+                "global_pending_count": int(global_state["pending_count"] or 0),
+                "global_last_success": str(global_state["last_success"] or ""),
+                "global_last_attempt": str(global_state["last_attempt"] or ""),
+                "global_last_error": str(global_state["last_error"] or ""),
             }
         )
     schema_checks = [
@@ -5331,6 +6018,7 @@ def summarize_diagnostics() -> dict:
     log_files = list_csv_files(LOGS_DIR)
     path_ok = ready_count == len(tracked_paths)
     schema_ok = all(item["ok"] for item in schema_rows)
+    global_mirror_ok = global_mirror_count == 0 or global_mirror_issue_count == 0
     backup_snapshots = len(list_backup_directories())
     full_backup_snapshots = len(list_backup_directories("full_backup_"))
     latest_full_backup = latest_backup_snapshot("full_backup_")
@@ -5369,6 +6057,16 @@ def summarize_diagnostics() -> dict:
             "detail": f"{backup_snapshots} backup snapshots are available for recovery.",
         },
         {
+            "key": "global_mirror",
+            "label": "Global save mirror",
+            "ok": global_mirror_ok,
+            "detail": (
+                "Local-only mode is active. No global mirror paths are configured."
+                if global_mirror_count == 0
+                else f"{global_mirror_count} global mirror path{'s' if global_mirror_count != 1 else ''} configured · {global_mirror_pending_count} pending sync job{'s' if global_mirror_pending_count != 1 else ''}."
+            ),
+        },
+        {
             "key": "reports",
             "label": "Report output lane",
             "ok": bool(reports_path and reports_path["status"] == "READY"),
@@ -5384,6 +6082,14 @@ def summarize_diagnostics() -> dict:
     passed_checks = sum(1 for item in health_checks if item["ok"])
     overall_ok = passed_checks == len(health_checks)
     return {
+        "runtime_root": str(ROOT_DIR),
+        "deployment_root": str(DEPLOYMENT_ROOT),
+        "default_local_root": str(default_local_root),
+        "global_root": str(global_root) if global_root is not None else "",
+        "runtime_mode": "local-first" if ROOT_DIR != DEPLOYMENT_ROOT else "direct-root",
+        "local_paths_config": str(TRACKED_PATH_OVERRIDES_FILE),
+        "global_root_config": str(GLOBAL_MIRROR_ROOT_FILE),
+        "global_paths_config": str(GLOBAL_MIRROR_OVERRIDES_FILE),
         "ready_count": ready_count,
         "tracked_count": len(tracked_paths),
         "path_rows": path_rows,
@@ -5396,6 +6102,10 @@ def summarize_diagnostics() -> dict:
         "full_backup_count": full_backup_snapshots,
         "latest_full_backup": latest_full_backup,
         "full_backup_policy_label": FULL_BACKUP_POLICY_LABEL,
+        "global_mirror_count": global_mirror_count,
+        "global_mirror_ready_count": global_mirror_ready_count,
+        "global_mirror_pending_count": global_mirror_pending_count,
+        "global_mirror_issue_count": global_mirror_issue_count,
         "container_logger": container_logger_status,
         "health_checks": health_checks,
         "passed_checks": passed_checks,
@@ -7980,6 +8690,7 @@ def create_sql_lab_results_export_action(payload: dict) -> JsonResponse:
                         *[" | ".join(parameter_value_map.get(name, ["—"])) for name in parameter_names],
                     ]
                 )
+        queue_global_mirror_sync(output_path)
     except OSError as exc:
         return JsonResponse({"ok": False, "message": f"Could not write matched results CSV: {exc}"}, 500)
     encoded_name = quote(output_path.name)
@@ -8989,6 +9700,12 @@ def save_diagnostics_paths_action(payload: dict) -> JsonResponse:
     defaults = tracked_path_defaults()
     overrides: dict[str, Path] = {}
     desired_paths: dict[str, Path] = {}
+    global_overrides: dict[str, str] = {}
+    raw_global_root = "" if reset_defaults else str(payload.get("globalRoot", "")).strip()
+    global_root_override = normalize_global_mirror_config_text(raw_global_root) if raw_global_root else ""
+    global_root_resolved = resolve_global_mirror_config_path(global_root_override) if global_root_override else None
+    if global_root_resolved is not None and global_root_resolved.exists() and not global_root_resolved.is_dir():
+        return JsonResponse({"ok": False, "message": "Global mirror root must point to a folder."}, 400)
     for item in TRACKED_PATH_SPECS:
         key = str(item["key"])
         label = str(item["label"])
@@ -9012,6 +9729,21 @@ def save_diagnostics_paths_action(payload: dict) -> JsonResponse:
         desired_paths[key] = normalized
         if not reset_defaults:
             overrides[key] = normalized
+        raw_global_value = "" if reset_defaults else str(payload.get(f"global__{key}", "")).strip()
+        if not raw_global_value:
+            continue
+        normalized_global = normalize_global_mirror_config_text(raw_global_value)
+        if global_root_override:
+            derived_from_root = derived_global_mirror_text_for_local_path(global_root_override, normalized)
+            if derived_from_root and normalize_global_mirror_config_text(derived_from_root) == normalized_global:
+                continue
+        resolved_global = resolve_global_mirror_config_path(normalized_global)
+        if resolved_global is not None and resolved_global.exists():
+            if kind == "dir" and not resolved_global.is_dir():
+                return JsonResponse({"ok": False, "message": f"{label} global mirror must point to a folder."}, 400)
+            if kind == "file" and not resolved_global.is_file():
+                return JsonResponse({"ok": False, "message": f"{label} global mirror must point to a file path, not a folder."}, 400)
+        global_overrides[key] = normalized_global
     move_notes: list[str] = []
     try:
         for item in TRACKED_PATH_SPECS:
@@ -9024,9 +9756,22 @@ def save_diagnostics_paths_action(payload: dict) -> JsonResponse:
     except ValueError as exc:
         return JsonResponse({"ok": False, "message": str(exc)}, 400)
     save_tracked_path_overrides({} if reset_defaults else overrides)
+    save_global_mirror_root_override(None if reset_defaults else global_root_override)
+    save_global_mirror_overrides({} if reset_defaults else global_overrides)
     sync_tracked_path_overrides_if_needed(force=True)
+    sync_global_mirror_root_if_needed(force=True)
+    sync_global_mirror_overrides_if_needed(force=True)
+    seed_local_from_global_if_needed()
+    queue_all_global_mirror_syncs()
+    ensure_global_mirror_worker()
     ensure_container_logger_process(force_restart=True)
     message = "Tracked paths reset to Tower defaults." if reset_defaults else "Tracked paths saved and applied to the Python app."
+    if global_root_override:
+        message = f"{message} Global mirror root is set to {global_root_override}."
+    elif reset_defaults:
+        message = f"{message} Global mirror root cleared."
+    if global_overrides:
+        message = f"{message} {len(global_overrides)} explicit global mirror path{'s' if len(global_overrides) != 1 else ''} queued for sync."
     if move_notes:
         message = f"{message} {move_notes[-1]}"
     return JsonResponse(
@@ -9654,8 +10399,8 @@ POST_ROUTE_LOCKS: dict[str, tuple[Path | str, ...]] = {
     "/api/order-draw/schedule": (DRAW_ORDERS,),
     "/api/dashboard/save-zones": (DATASET_DIR,),
     "/api/dashboard/math-plot-export": (REPORTS_DIR,),
-    "/api/data-diagnostics/paths": (TRACKED_PATH_OVERRIDES_FILE,),
-    "/api/data-diagnostics/full-backup": (BACKUPS_DIR, TRACKED_PATH_OVERRIDES_FILE),
+    "/api/data-diagnostics/paths": (TRACKED_PATH_OVERRIDES_FILE, GLOBAL_MIRROR_ROOT_FILE, GLOBAL_MIRROR_OVERRIDES_FILE),
+    "/api/data-diagnostics/full-backup": (BACKUPS_DIR, TRACKED_PATH_OVERRIDES_FILE, GLOBAL_MIRROR_ROOT_FILE, GLOBAL_MIRROR_OVERRIDES_FILE),
 }
 
 
@@ -10037,6 +10782,7 @@ def run(host: str | None = None, port: int | None = None) -> None:
 
 
 atexit.register(stop_container_logger_process)
+atexit.register(stop_global_mirror_worker)
 
 
 if __name__ == "__main__":

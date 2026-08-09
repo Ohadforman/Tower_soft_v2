@@ -97,10 +97,25 @@ def bootstrap_check() -> dict[str, object]:
 
 def diagnostics_check() -> dict[str, object]:
     payload = server.build_diagnostics_payload().body
-    expected_keys = {"ready_count", "tracked_count", "health_checks", "overall_ok"}
+    expected_keys = {
+        "ready_count",
+        "tracked_count",
+        "health_checks",
+        "overall_ok",
+        "global_mirror_count",
+        "global_mirror_pending_count",
+        "global_mirror_issue_count",
+    }
     missing = sorted(expected_keys.difference(payload.keys()))
     if missing:
         return check("diagnostics", False, f"Diagnostics payload is missing keys: {', '.join(missing)}")
+    path_rows = payload.get("path_rows") or []
+    if path_rows:
+        sample = path_rows[0]
+        required_row_keys = {"global_enabled", "global_path", "global_status", "global_detail"}
+        row_missing = sorted(required_row_keys.difference(sample.keys()))
+        if row_missing:
+            return check("diagnostics", False, f"Diagnostics path rows are missing mirror fields: {', '.join(row_missing)}")
     return check(
         "diagnostics",
         True,

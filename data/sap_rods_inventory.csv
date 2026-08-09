@@ -1,5 +1,3 @@
 Item,Count,Units,Last Updated,Notes
-SAP Rods Set,8,sets,2026-02-06 10:16:10,"nan
-[2026-02-03 08:27:27] Tried -1 set (PM draw FTT666_1) but Count was 0.
-[2026-02-03 08:30:02] -1 set (PM draw FTT666_1). New Count=9.
-[2026-02-06 10:16:10] -1 set (PM draw CIVAN - LARA_AAA_20260206_101525). New Count=8."
+SAP Rods Set,0,sets,2026-05-26 22:57:12,"Manual low-stock UI check
+[2026-05-26 22:57:12] Attempted decrement for PANDA - PM draw QA5262269 but Count was 0."

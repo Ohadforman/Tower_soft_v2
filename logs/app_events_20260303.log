@@ -1,6 +1,0 @@
-{"ts": "2026-03-03 16:08:58", "event": "preflight_run", "ok": true, "failed": 0, "elapsed_s": 0.01}
-{"ts": "2026-03-03 16:08:58", "event": "app_tests_run", "exit_code": 0, "strict_warnings": false, "ui_smoke": false}
-{"ts": "2026-03-03 16:08:58", "event": "app_tests_run", "exit_code": 0, "strict_warnings": false, "ui_smoke": false}
-{"ts": "2026-03-03 16:08:58", "event": "path_permissions_audit", "ok": true, "critical_issues": 0, "json_report": "/Users/ohadformanair/PycharmProjects/Tower_work/reports/path_audit/path_permissions_20260303_160858.json", "csv_report": "/Users/ohadformanair/PycharmProjects/Tower_work/reports/path_audit/path_permissions_20260303_160858.csv"}
-{"ts": "2026-03-03 16:08:58", "event": "all_checks_run", "ok": true, "failed_count": 0, "report_path": "/Users/ohadformanair/PycharmProjects/Tower_work/reports/checks/all_checks_20260303_160858.json"}
-{"ts": "2026-03-03 17:45:31", "event": "app_tests_run", "exit_code": 0, "strict_warnings": false, "ui_smoke": false}

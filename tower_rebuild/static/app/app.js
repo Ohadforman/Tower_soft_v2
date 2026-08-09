@@ -7810,6 +7810,7 @@ async function renderDashboardRebuildPage(data) {
 }
 
 async function renderDiagnosticsPage(data) {
+  const runtimeModeLabel = data.runtime_mode === "local-first" ? "Local-first runtime" : "Direct root runtime";
   const healthRows = (data.health_checks || [])
     .map(
       (item) => `
@@ -7826,23 +7827,37 @@ async function renderDiagnosticsPage(data) {
     .join("");
   const pathRows = data.path_rows
     .map(
-      (item) => `
-        <article class="diag-row tone-${item.status === "READY" ? "good" : "bad"}">
-          <div>
+      (item) => {
+        const localTone = item.status === "BLOCKED" ? "bad" : "good";
+        const globalTone = ["READY", "SYNCED", "LOCAL ONLY"].includes(item.global_status)
+          ? "good"
+          : ["SYNCING", "CONFIG ONLY", "WAITING"].includes(item.global_status)
+            ? "warn"
+            : "bad";
+        return `
+        <article class="diag-row tone-${localTone}">
+          <div class="diag-row-copy">
             <h3>${escapeHtml(item.label || item.key)}</h3>
-            <p>${escapeHtml(item.path)}</p>
+            <p><strong>Local</strong> · ${escapeHtml(item.path)}</p>
+            <p class="diag-row-substate tone-${localTone}">${escapeHtml(item.status || "READY")} · ${escapeHtml(item.local_detail || "")}</p>
+            <p><strong>Global</strong> · ${item.global_enabled ? escapeHtml(item.global_path || "Not set") : "Local only"}</p>
+            <p class="diag-row-substate tone-${globalTone}">${escapeHtml(item.global_status || "LOCAL ONLY")} · ${escapeHtml(item.global_detail || "No global mirror configured.")}</p>
           </div>
           <div class="diag-row-meta">
             <strong>${item.status}</strong>
             <span>${item.is_override ? "Custom override" : "Tower default"} · ${escapeHtml(item.modified)}</span>
+            <span>${escapeHtml(item.global_enabled ? `Mirror ${item.global_status}` : "Mirror off")}</span>
           </div>
         </article>
-      `,
+      `;
+      },
     )
     .join("");
   const pathEditorRows = data.path_rows
     .map(
       (item) => {
+        const localTone = item.status === "BLOCKED" ? "bad" : "good";
+        const globalTone = ["READY", "SYNCED", "LOCAL ONLY"].includes(item.global_status) ? "good" : item.global_status === "SYNCING" ? "warn" : "bad";
         const backupTools =
           item.key === "backups_dir"
             ? `
@@ -7858,10 +7873,15 @@ async function renderDiagnosticsPage(data) {
             : "";
         return `
         <label class="field-block diag-path-field ${item.key === "backups_dir" ? "is-backup" : ""}">
-          <span>${escapeHtml(item.label || item.key)}</span>
+          <span>${escapeHtml(item.label || item.key)} · Local runtime</span>
           <input type="text" name="${escapeHtml(item.key)}" value="${escapeHtml(item.path)}" placeholder="${escapeHtml(item.default_path || "")}" />
           <small>${item.is_override ? `Override active. Default: ${escapeHtml(item.default_path || "")}` : `Default path. ${escapeHtml(item.kind === "dir" ? "Folder" : "File")} target.`}</small>
-          <em class="diag-path-inline-state tone-${item.status === "READY" ? "good" : "bad"}">${item.status} · ${escapeHtml(item.kind === "dir" ? "folder" : "file")}</em>
+          <em class="diag-path-inline-state tone-${localTone}">${item.status} · ${escapeHtml(item.kind === "dir" ? "folder" : "file")}</em>
+          <small>${escapeHtml(item.local_detail || "")}</small>
+          <span class="diag-path-subhead">Global mirror (optional)</span>
+          <input type="text" name="global__${escapeHtml(item.key)}" value="${escapeHtml(item.global_path || "")}" placeholder="Leave blank to keep this lane local only" />
+          <small>${item.global_enabled ? escapeHtml(item.global_detail || "Global mirror configured.") : "If the global target is unavailable, the app still saves locally first and retries in the background."}</small>
+          <em class="diag-path-inline-state tone-${globalTone}">${escapeHtml(item.global_status || "LOCAL ONLY")}${item.global_pending_count ? ` · ${item.global_pending_count} queued` : ""}</em>
           ${backupTools}
         </label>
       `;
@@ -7908,6 +7928,9 @@ async function renderDiagnosticsPage(data) {
           <div class="metric-pill tone-${data.overall_ok ? "good" : "warn"}"><span>Checks passed</span><strong>${data.passed_checks}</strong></div>
           <div class="metric-pill tone-good"><span>Ready paths</span><strong>${data.ready_count}</strong></div>
           <div class="metric-pill tone-info"><span>Path manager</span><strong>${data.tracked_count}</strong></div>
+          <div class="metric-pill tone-info"><span>Global mirrors</span><strong>${data.global_mirror_count || 0}</strong></div>
+          <div class="metric-pill tone-${Number(data.global_mirror_pending_count || 0) ? "warn" : "good"}"><span>Pending sync</span><strong>${data.global_mirror_pending_count || 0}</strong></div>
+          <div class="metric-pill tone-${Number(data.global_mirror_issue_count || 0) ? "bad" : "good"}"><span>Global issues</span><strong>${data.global_mirror_issue_count || 0}</strong></div>
           <div class="metric-pill tone-info"><span>Dataset CSVs</span><strong>${data.dataset_count}</strong></div>
           <div class="metric-pill tone-info"><span>Log CSVs</span><strong>${data.log_count}</strong></div>
           <div class="metric-pill tone-warn"><span>Backup snapshots</span><strong>${data.backup_snapshots}</strong></div>
@@ -7921,8 +7944,28 @@ async function renderDiagnosticsPage(data) {
         })}
         ${collapsibleSection("Full path manager", `
           <div class="diag-path-editor-shell">
-            <div class="micro-panel diag-path-editor-note">Manage the app's tracked live data and workspace paths here. Saves apply immediately to the Python app, create missing folders, and move live files or folder contents into the new location when possible. Paths stay persisted in <code>state/tracked_path_overrides.json</code>. Use absolute paths or paths relative to the Tower workspace root.</div>
+            <div class="micro-panel diag-path-editor-note">
+              <strong>What to set</strong>: in the real deployment the shared global mirror is usually already set once for everyone. On each machine, the important part is the local runtime for that OS user.
+              <br />
+              <strong>How local works</strong>: the app takes the current OS user, enters that user’s <code>Documents</code> folder, and uses <code>documents-cache_tower</code> as the local runtime root. On Windows that means a path like <code>C:/Users/&lt;user&gt;/Documents/documents-cache_tower</code>. If the folder is missing, the app creates it automatically on first run, then adds the normal folders after it like <code>data</code>, <code>maintenance</code>, <code>logs</code>, <code>reports</code>, and <code>state</code>.
+              <br />
+              <strong>What to do on a new computer</strong>: 1. Open this page on that machine. 2. Check that the local runtime paths point to the correct local user area. 3. Click <code>Save path changes</code> only if you changed the local paths. Touch <code>Global mirror root</code> only when the shared deployment location itself has changed.
+              <br />
+              <strong>Use the per-path global fields only</strong> when one lane must mirror somewhere different from the normal shared Tower tree. Local runtime overrides stay per OS user, while the global mirror settings stay shared for the deployment.
+            </div>
             <form id="diagnostics-path-form" class="diag-path-editor">
+              <div class="diag-root-grid">
+                <label class="field-block diag-root-field">
+                  <span>Resolved local runtime root</span>
+                  <input type="text" value="${escapeHtml(data.runtime_root || "")}" readonly />
+                  <small>${escapeHtml(runtimeModeLabel)}. Auto local default on this machine: ${escapeHtml(data.default_local_root || "")}</small>
+                </label>
+                <label class="field-block diag-root-field">
+                  <span>Global mirror root (optional)</span>
+                  <input type="text" name="globalRoot" value="${escapeHtml(data.global_root || "")}" placeholder="Example: Z:\\TowerWork or /mnt/tower/Tower_work" />
+                  <small>If set, matching runtime folders like <code>data</code>, <code>maintenance</code>, <code>logs</code>, <code>reports</code>, and <code>state</code> mirror under this one parent path automatically. This shared setting is common for everyone using the deployment.</small>
+                </label>
+              </div>
               <div class="diag-path-editor-grid">${pathEditorRows}</div>
               <div class="parts-form-actions diag-path-actions">
                 <button class="action-btn action-primary" type="submit">Save path changes</button>
@@ -7979,7 +8022,7 @@ function bindDiagnosticsPage() {
     }
   });
   resetButton?.addEventListener("click", async () => {
-    const confirmed = window.confirm("Reset all tracked diagnostics paths back to the Tower defaults?");
+    const confirmed = window.confirm("Reset all local runtime paths and clear all global mirror paths back to the Tower defaults?");
     if (!confirmed) return;
     clearError();
     try {

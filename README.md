@@ -130,7 +130,6 @@ python3 scripts/cli/run_v2_deploy_protocol.py
 ```
 
 Helpful docs:
-
 - [Architecture](docs/ARCHITECTURE.md)
 - [Operations](docs/OPERATIONS.md)
 - [V2 Deployment Protocol](docs/V2_DEPLOY_PROTOCOL.md)

@@ -1,5 +1,5 @@
-Fiber Project,Fiber Geometry Type,Tiger Cut (%),Octagonal F2F (mm),Fiber Diameter (µm),Fiber Diameter Tol (± µm),Main Coating Diameter (µm),Main Coating Diameter Tol (± µm),Secondary Coating Diameter (µm),Secondary Coating Diameter Tol (± µm),Tension (g),Draw Speed (m/min),Main Coating,Secondary Coating,Main Coating Temperature (°C),Secondary Coating Temperature (°C),Notes Default,Preform Diameter (mm)
-LARA - ELOP,Octagonal,21.0,28.0,400.0,,560.0,,650.0,,60.0,40.0,Coating_OF_136,DP-1032,28.0,28.0,,
-TAMAM - TIGER,TIGER - PM,21.0,0.0,40.0,0.6,83.0,1.0,105.0,5.0,20.0,50.0,DP-1032,DS-2015,36.0,28.0,,16.0
-CIVAN - LARA,PANDA - PM,0.0,0.0,400.0,15.0,560.0,15.0,670.0,15.0,20.0,20.0,Coating_OF_136,DS-2015,28.0,28.0,,
-ELOP - 130/10,STEP INDEX,0.0,0.0,130.0,1.0,190.0,5.0,245.0,15.0,20.0,50.0,DP-1032,DS-2015,25.0,25.0,,
+Fiber Project,Fiber Geometry Type,Preform Diameter (mm),Tiger Cut (%),Octagonal F2F (mm),Fiber Diameter (µm),Fiber Diameter Tol (± µm),Main Coating Diameter (µm),Main Coating Diameter Tol (± µm),Secondary Coating Diameter (µm),Secondary Coating Diameter Tol (± µm),Tension (g),Draw Speed (m/min),Furnace Temperature (°C),Main Coating,Secondary Coating,Main Coating Temperature (°C),Secondary Coating Temperature (°C),Notes Default
+LARA - ELOP,Octagonal,,21.0,28.0,400.0,,560.0,,650.0,,60.0,40.0,,Coating_OF_136,DP-1032,28.0,28.0,
+TAMAM - TIGER,TIGER - PM,16.0,21.0,0.0,40.0,0.6,83.0,1.0,105.0,5.0,20.0,50.0,,DP-1032,DS-2015,36.0,28.0,
+CIVAN - LARA,PANDA - PM,,0.0,0.0,400.0,15.0,560.0,15.0,670.0,15.0,20.0,20.0,,Coating_OF_136,DS-2015,28.0,28.0,
+ELOP - 130/10,STEP INDEX,,0.0,0.0,130.0,1.0,190.0,5.0,245.0,15.0,20.0,50.0,,DP-1032,DS-2015,25.0,25.0,

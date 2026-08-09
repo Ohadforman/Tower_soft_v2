@@ -1041,11 +1041,31 @@ button.is-pressing,
   text-transform: uppercase;
 }
 
+.diag-row-copy strong {
+  color: rgba(236,255,251,0.88);
+}
+
 .diag-row p {
   margin: 0;
   font-size: 0.85rem;
   line-height: 1.35;
   word-break: break-word;
+}
+
+.diag-row-substate {
+  margin-top: 4px;
+}
+
+.diag-row-substate.tone-good {
+  color: rgba(120,247,162,0.92);
+}
+
+.diag-row-substate.tone-warn {
+  color: rgba(255,213,111,0.92);
+}
+
+.diag-row-substate.tone-bad {
+  color: #ff8c6b;
 }
 
 .diag-row-meta {
@@ -1173,6 +1193,17 @@ button.is-pressing,
   background: linear-gradient(180deg, rgba(9, 18, 28, 0.52), rgba(9, 18, 28, 0.24));
 }
 
+.diag-root-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.diag-root-field {
+  display: grid;
+  gap: 8px;
+}
+
 .diag-path-editor-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1195,6 +1226,11 @@ button.is-pressing,
   text-transform: uppercase;
 }
 
+.diag-path-subhead {
+  margin-top: 4px;
+  color: rgba(214,247,241,0.86);
+}
+
 .diag-path-field small {
   color: var(--muted);
   font-size: 0.8rem;
@@ -1212,6 +1248,10 @@ button.is-pressing,
 
 .diag-path-inline-state.tone-bad {
   color: #ff8c6b;
+}
+
+.diag-path-inline-state.tone-warn {
+  color: rgba(255,213,111,0.92);
 }
 
 .diag-path-actions {
@@ -16599,6 +16639,7 @@ body.is-maint-dragging-cutoff * {
   }
 
   .diag-check-grid,
+  .diag-root-grid,
   .diag-path-editor-grid {
     grid-template-columns: 1fr;
   }

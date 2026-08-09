@@ -60,3 +60,6 @@ import_reviews/
 
 # OS noise
 .DS_Store
+
+# Mistyped or simulated Windows drive folders created inside the repo on Unix/macOS
+[A-Za-z]:/
